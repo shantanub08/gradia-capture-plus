@@ -45,8 +45,63 @@ function getToolDef(id) {
     return TOOLS.find(t => t.id === id) ?? null;
 }
 
+function getStrokePadding(toolId, strokeWidth) {
+    const sw = strokeWidth ?? 4;
+    switch (toolId) {
+        case 'arrow':
+            return sw * 5 + 16;
+        case 'highlighter':
+            return sw * 4 + 16;
+        case 'stamp':
+            return sw * 5 + 24;
+        case 'text':
+            return sw * 3 + 24;
+        default:
+            return sw * 2 + 16;
+    }
+}
+
+const CommittedArea = GObject.registerClass(
+    class CommittedArea extends St.DrawingArea {
+        _init(canvas) {
+            super._init({
+                reactive: false,
+                x_expand: true,
+                y_expand: true,
+                style: 'background-color: transparent;',
+            });
+            this._canvas = canvas;
+        }
+
+        vfunc_repaint() {
+            const cr = this.get_context();
+            this._canvas._paintCommitted(cr);
+            cr.$dispose();
+        }
+    }
+);
+
+const ActiveArea = GObject.registerClass(
+    class ActiveArea extends St.DrawingArea {
+        _init(canvas) {
+            super._init({
+                reactive: false,
+                visible: false,
+                style: 'background-color: transparent;',
+            });
+            this._canvas = canvas;
+        }
+
+        vfunc_repaint() {
+            const cr = this.get_context();
+            this._canvas._paintActive(cr);
+            cr.$dispose();
+        }
+    }
+);
+
 const DrawingCanvas = GObject.registerClass(
-    class DrawingCanvas extends St.DrawingArea {
+    class DrawingCanvas extends St.Widget {
         _init(params) {
             super._init({
                 reactive: false,
@@ -65,11 +120,26 @@ const DrawingCanvas = GObject.registerClass(
             this._dragGrab = null;
             this._stampCounter = 1;
             this._selectedStroke = null;
+            this._activeBBox = null;
 
-            this._scaleX = 1;
-            this._scaleY = 1;
+            this._originX = 0;
+            this._originY = 0;
 
-            this.connect('notify::allocation', () => this._updateScale());
+            this._committedArea = new CommittedArea(this);
+            this._committedArea.set_position(0, 0);
+            this._committedArea.add_constraint(new Clutter.BindConstraint({
+                source: this,
+                coordinate: Clutter.BindCoordinate.SIZE,
+            }));
+            this.add_child(this._committedArea);
+
+            this._activeArea = new ActiveArea(this);
+            this.add_child(this._activeArea);
+
+            this.connect('notify::allocation', () => {
+                this._updateOrigin();
+                this._committedArea.queue_repaint();
+            });
         }
 
         get strokes() { return this._strokes; }
@@ -80,22 +150,25 @@ const DrawingCanvas = GObject.registerClass(
             this._toolId = id;
             if (id !== 'drag')
                 this._selectedStroke = null;
+            this._committedArea.queue_repaint();
         }
         setStrokeWidth(w) { this._strokeWidth = w; }
 
         clear() {
             this._strokes = [];
             this._currentStroke = null;
+            this._activeBBox = null;
+            this._activeArea.hide();
             this._stampCounter = 1;
             this._selectedStroke = null;
-            this.queue_repaint();
+            this._committedArea.queue_repaint();
         }
 
         undo() {
             if (this._strokes.length > 0) {
                 this._strokes.pop();
                 this._selectedStroke = null;
-                this.queue_repaint();
+                this._committedArea.queue_repaint();
             }
         }
 
@@ -108,7 +181,7 @@ const DrawingCanvas = GObject.registerClass(
             if (idx !== -1)
                 this._strokes.splice(idx, 1);
             this._selectedStroke = null;
-            this.queue_repaint();
+            this._committedArea.queue_repaint();
             return true;
         }
 
@@ -118,19 +191,19 @@ const DrawingCanvas = GObject.registerClass(
                 const tool = getToolDef(stroke.toolId);
                 if (tool?.hitTest?.(stroke, stageX, stageY)) {
                     this._selectedStroke = stroke;
-                    this.queue_repaint();
+                    this._committedArea.queue_repaint();
                     return stroke;
                 }
             }
             this._selectedStroke = null;
-            this.queue_repaint();
+            this._committedArea.queue_repaint();
             return null;
         }
 
         clearSelection() {
             if (this._selectedStroke) {
                 this._selectedStroke = null;
-                this.queue_repaint();
+                this._committedArea.queue_repaint();
             }
         }
 
@@ -141,13 +214,13 @@ const DrawingCanvas = GObject.registerClass(
                 p.x += dx;
                 p.y += dy;
             }
-            this.queue_repaint();
+            this._committedArea.queue_repaint();
         }
 
         adoptStroke(stroke) {
             this._strokes.push(stroke);
             this._selectedStroke = stroke;
-            this.queue_repaint();
+            this._committedArea.queue_repaint();
         }
 
         evictStroke(stroke) {
@@ -156,28 +229,57 @@ const DrawingCanvas = GObject.registerClass(
                 this._strokes.splice(idx, 1);
             if (this._selectedStroke === stroke)
                 this._selectedStroke = null;
-            this.queue_repaint();
+            this._committedArea.queue_repaint();
         }
 
-        _updateScale() {
-            const alloc = this.allocation;
-            const stageW = alloc.get_width();
-            const stageH = alloc.get_height();
+        queue_repaint() {
+            this._committedArea.queue_repaint();
+        }
 
-            this._scaleX = stageW > 0 ? Math.max(1, stageW / MAX_CANVAS_WIDTH) : 1;
-            this._scaleY = stageH > 0 ? Math.max(1, stageH / MAX_CANVAS_HEIGHT) : 1;
+        _getSelectionBounds() {
+            const ui = Main.screenshotUI;
+            if (!ui?._selectionButton?.checked || !ui._areaSelector)
+                return null;
+            const [x, y, w, h] = ui._areaSelector.getGeometry?.() ?? [0, 0, 0, 0];
+            if (w <= 2 || h <= 2)
+                return null;
+            return { minX: x, minY: y, maxX: x + w, maxY: y + h, w, h };
+        }
+
+        _updateOrigin() {
+            const [ok, lx, ly] = this.transform_stage_point(0, 0);
+            if (ok) {
+                this._originX = -lx;
+                this._originY = -ly;
+            } else {
+                const [x, y] = this.get_transformed_position();
+                this._originX = x;
+                this._originY = y;
+            }
         }
 
         _stageToLocal(stageX, stageY) {
-            const [ok, localX, localY] = this.transform_stage_point(stageX, stageY);
-            if (!ok) return null;
-            return { x: localX, y: localY };
+            if (this._originX === undefined || this._originY === undefined)
+                this._updateOrigin();
+            return {
+                x: stageX - (this._originX ?? 0),
+                y: stageY - (this._originY ?? 0),
+            };
         }
 
         _startDrawing(stageX, stageY) {
             const tool = getToolDef(this._toolId);
             if (!tool?.isDrawing)
                 return;
+
+            const selBounds = this._getSelectionBounds();
+            if (selBounds) {
+                if (stageX < selBounds.minX || stageX > selBounds.maxX ||
+                    stageY < selBounds.minY || stageY > selBounds.maxY)
+                    return;
+            }
+
+            this._updateOrigin();
 
             const extra = tool.beginStroke?.() ?? {};
             this._currentStroke = {
@@ -196,6 +298,7 @@ const DrawingCanvas = GObject.registerClass(
 
             this._drawing = true;
             this._dragGrab = global.stage.grab(this);
+            this._updateActiveAreaGeometry();
         }
 
         _finishStamp() {
@@ -203,17 +306,66 @@ const DrawingCanvas = GObject.registerClass(
                 this._strokes.push(this._currentStroke);
             this._stampCounter++;
             this._currentStroke = null;
-            this.queue_repaint();
+            this._committedArea.queue_repaint();
+        }
+
+        _updateActiveAreaGeometry() {
+            if (!this._currentStroke || this._currentStroke.stagePoints.length === 0)
+                return;
+
+            const pts = this._currentStroke.stagePoints;
+            let minX = pts[0].x, minY = pts[0].y, maxX = pts[0].x, maxY = pts[0].y;
+            for (let i = 1; i < pts.length; i++) {
+                const p = pts[i];
+                if (p.x < minX) minX = p.x;
+                if (p.y < minY) minY = p.y;
+                if (p.x > maxX) maxX = p.x;
+                if (p.y > maxY) maxY = p.y;
+            }
+
+            const pad = getStrokePadding(this._toolId, this._strokeWidth);
+            const boxX = minX - pad;
+            const boxY = minY - pad;
+            const boxW = Math.max(1, Math.ceil(maxX - minX + pad * 2));
+            const boxH = Math.max(1, Math.ceil(maxY - minY + pad * 2));
+
+            this._activeBBox = { x: boxX, y: boxY, w: boxW, h: boxH };
+
+            if (this._originX === undefined || this._originY === undefined)
+                this._updateOrigin();
+
+            const localX = Math.round(boxX - (this._originX ?? 0));
+            const localY = Math.round(boxY - (this._originY ?? 0));
+
+            this._activeArea.set_position(localX, localY);
+            this._activeArea.set_size(boxW, boxH);
+            this._activeArea.show();
+            this._activeArea.queue_repaint();
         }
 
         _updateDrawing(stageX, stageY) {
-            if (!this._drawing)
+            if (!this._drawing || !this._currentStroke)
                 return;
 
-            const tool = getToolDef(this._toolId);
+            const selBounds = this._getSelectionBounds();
+            if (selBounds) {
+                stageX = Math.max(selBounds.minX, Math.min(selBounds.maxX, stageX));
+                stageY = Math.max(selBounds.minY, Math.min(selBounds.maxY, stageY));
+            }
 
-            if (tool?.id === 'freehand') {
-                this._currentStroke.stagePoints.push({ x: stageX, y: stageY });
+            const tool = getToolDef(this._toolId);
+            const isContinuous = (tool?.id === 'freehand' || tool?.id === 'highlighter');
+
+            if (isContinuous) {
+                const pts = this._currentStroke.stagePoints;
+                const lastPt = pts[pts.length - 1];
+                if (lastPt) {
+                    const dx = stageX - lastPt.x;
+                    const dy = stageY - lastPt.y;
+                    if (dx * dx + dy * dy < MIN_DISTANCE_SQ)
+                        return;
+                }
+                pts.push({ x: stageX, y: stageY });
             } else {
                 if (this._currentStroke.stagePoints.length === 1)
                     this._currentStroke.stagePoints.push({ x: stageX, y: stageY });
@@ -221,14 +373,34 @@ const DrawingCanvas = GObject.registerClass(
                     this._currentStroke.stagePoints[this._currentStroke.stagePoints.length - 1] = { x: stageX, y: stageY };
             }
 
-            this.queue_repaint();
+            this._updateActiveAreaGeometry();
         }
 
-        _endDrawing() {
-            if (this._currentStroke && this._currentStroke.stagePoints.length > 1)
-                this._strokes.push(this._currentStroke);
+        _endDrawing(stageX = null, stageY = null) {
+            if (this._currentStroke) {
+                if (stageX !== null && stageY !== null) {
+                    const selBounds = this._getSelectionBounds();
+                    if (selBounds) {
+                        stageX = Math.max(selBounds.minX, Math.min(selBounds.maxX, stageX));
+                        stageY = Math.max(selBounds.minY, Math.min(selBounds.maxY, stageY));
+                    }
+                    const pts = this._currentStroke.stagePoints;
+                    const lastPt = pts[pts.length - 1];
+                    const isContinuous = (this._toolId === 'freehand' || this._toolId === 'highlighter');
+                    if (!lastPt || lastPt.x !== stageX || lastPt.y !== stageY) {
+                        if (isContinuous)
+                            pts.push({ x: stageX, y: stageY });
+                        else if (pts.length > 1)
+                            pts[pts.length - 1] = { x: stageX, y: stageY };
+                    }
+                }
+                if (this._currentStroke.stagePoints.length > 1)
+                    this._strokes.push(this._currentStroke);
+            }
 
             this._currentStroke = null;
+            this._activeBBox = null;
+            this._activeArea.hide();
             this._drawing = false;
             this._dragButton = 0;
 
@@ -237,13 +409,13 @@ const DrawingCanvas = GObject.registerClass(
                 this._dragGrab = null;
             }
 
-            this.queue_repaint();
+            this._committedArea.queue_repaint();
         }
 
         commitTextStroke(stroke) {
             if (stroke)
                 this._strokes.push(stroke);
-            this.queue_repaint();
+            this._committedArea.queue_repaint();
         }
 
         vfunc_button_press_event(event) {
@@ -264,7 +436,8 @@ const DrawingCanvas = GObject.registerClass(
             if (event.get_button() !== this._dragButton)
                 return Clutter.EVENT_PROPAGATE;
 
-            this._endDrawing();
+            const [stageX, stageY] = event.get_coords();
+            this._endDrawing(stageX, stageY);
             return Clutter.EVENT_STOP;
         }
 
@@ -298,30 +471,38 @@ const DrawingCanvas = GObject.registerClass(
                 eventType === Clutter.EventType.TOUCH_CANCEL) {
                 if (!this._drawing)
                     return Clutter.EVENT_PROPAGATE;
-                this._endDrawing();
+                const [stageX, stageY] = event.get_coords();
+                this._endDrawing(stageX, stageY);
                 return Clutter.EVENT_STOP;
             }
 
             return Clutter.EVENT_PROPAGATE;
         }
 
-        vfunc_repaint() {
-            const cr = this.get_context();
+        _paintCommitted(cr) {
+            if (this._originX === undefined || this._originY === undefined)
+                this._updateOrigin();
 
-            const allStrokes = [...this._strokes];
-            if (this._currentStroke)
-                allStrokes.push(this._currentStroke);
+            const ox = this._originX ?? 0;
+            const oy = this._originY ?? 0;
+
+            const selBounds = this._getSelectionBounds();
+            if (selBounds) {
+                cr.rectangle(selBounds.minX - ox, selBounds.minY - oy, selBounds.w, selBounds.h);
+                cr.clip();
+            }
 
             let stampCounter = 1;
 
-            for (const stroke of allStrokes) {
+            for (const stroke of this._strokes) {
                 const tool = getToolDef(stroke.toolId);
                 if (!tool?.render)
                     continue;
 
-                const localPoints = stroke.stagePoints
-                    .map(sp => this._stageToLocal(sp.x, sp.y))
-                    .filter(p => p !== null);
+                const localPoints = stroke.stagePoints.map(sp => ({
+                    x: sp.x - ox,
+                    y: sp.y - oy,
+                }));
 
                 tool.render(cr, {
                     color: stroke.color,
@@ -335,20 +516,58 @@ const DrawingCanvas = GObject.registerClass(
                 const tool = getToolDef(this._selectedStroke.toolId);
                 const bounds = tool?.bounds?.(this._selectedStroke);
                 if (bounds) {
-                    const tl = this._stageToLocal(bounds.minX, bounds.minY);
-                    const br = this._stageToLocal(bounds.maxX, bounds.maxY);
-                    if (tl && br) {
-                        cr.setSourceRGBA(1.0, 1.0, 1.0, 0.9);
-                        cr.setLineWidth(1.5);
-                        cr.setDash([5, 4], 0);
-                        cr.rectangle(tl.x, tl.y, br.x - tl.x, br.y - tl.y);
-                        cr.stroke();
-                    }
+                    const tlX = bounds.minX - ox;
+                    const tlY = bounds.minY - oy;
+                    const brX = bounds.maxX - ox;
+                    const brY = bounds.maxY - oy;
+                    cr.setSourceRGBA(1.0, 1.0, 1.0, 0.9);
+                    cr.setLineWidth(1.5);
+                    cr.setDash([5, 4], 0);
+                    cr.rectangle(tlX, tlY, brX - tlX, brY - tlY);
+                    cr.stroke();
                 }
             }
-            cr.$dispose();
         }
-    });
+
+        _paintActive(cr) {
+            if (!this._currentStroke || !this._activeBBox)
+                return;
+
+            const tool = getToolDef(this._currentStroke.toolId);
+            if (!tool?.render)
+                return;
+
+            const bboxX = this._activeBBox.x;
+            const bboxY = this._activeBBox.y;
+
+            const selBounds = this._getSelectionBounds();
+            if (selBounds) {
+                cr.rectangle(selBounds.minX - bboxX, selBounds.minY - bboxY, selBounds.w, selBounds.h);
+                cr.clip();
+            }
+
+            const localPoints = this._currentStroke.stagePoints.map(p => ({
+                x: p.x - bboxX,
+                y: p.y - bboxY,
+            }));
+
+            let stampCount = 1;
+            if (this._currentStroke.toolId === 'stamp') {
+                for (const s of this._strokes) {
+                    if (s.toolId === 'stamp')
+                        stampCount++;
+                }
+            }
+
+            tool.render(cr, {
+                color: this._currentStroke.color,
+                points: localPoints,
+                counter: this._currentStroke.counter ?? stampCount,
+                text: this._currentStroke.text,
+            }, this._currentStroke.strokeWidth);
+        }
+    }
+);
 
 const DrawingInputOverlay = GObject.registerClass(
     class DrawingInputOverlay extends St.Widget {
@@ -657,6 +876,23 @@ export default class GradiaCompanion extends Extension {
         }
     }
 
+    _binForStagePoint(stageX, stageY) {
+        for (let i = 0; i < this._bins.length; i++) {
+            if (this._binContainsStagePoint(this._bins[i], stageX, stageY))
+                return this._bins[i];
+        }
+        return Main.screenshotUI._primaryMonitorBin ?? this._bins[0] ?? null;
+    }
+
+    _moveToolbarToMonitor(bin) {
+        if (!this._toolbar || !bin || this._toolbar.get_parent() === bin)
+            return;
+        const curParent = this._toolbar.get_parent();
+        if (curParent)
+            curParent.remove_child(this._toolbar);
+        bin.add_child(this._toolbar);
+    }
+
     _updateTrashButton() {
         const sel = this._getSelectedCanvasAndStroke();
         if (!sel) {
@@ -671,11 +907,13 @@ export default class GradiaCompanion extends Extension {
             return;
         }
 
-        const primaryBin = Main.screenshotUI._primaryMonitorBin;
-        if (!primaryBin)
+        const targetBin = this._binForStagePoint(bounds.maxX, bounds.minY);
+        if (!targetBin) {
+            this._hideTrashButton();
             return;
+        }
 
-        const [okTR, localTRX, localTRY] = primaryBin.transform_stage_point(bounds.maxX, bounds.minY);
+        const [okTR, localTRX, localTRY] = targetBin.transform_stage_point(bounds.maxX, bounds.minY);
         if (!okTR) {
             this._hideTrashButton();
             return;
@@ -697,7 +935,16 @@ export default class GradiaCompanion extends Extension {
                     this._hideTrashButton();
                 }
             });
-            primaryBin.insert_child_below(this._trashButton, Main.screenshotUI._panel);
+        }
+
+        if (this._trashButton.get_parent() !== targetBin) {
+            const curParent = this._trashButton.get_parent();
+            if (curParent)
+                curParent.remove_child(this._trashButton);
+            if (Main.screenshotUI._panel && Main.screenshotUI._panel.get_parent() === targetBin)
+                targetBin.insert_child_below(this._trashButton, Main.screenshotUI._panel);
+            else
+                targetBin.add_child(this._trashButton);
         }
 
         const btnX = Math.round(localTRX - TRASH_BUTTON_RADIUS);
@@ -839,11 +1086,11 @@ export default class GradiaCompanion extends Extension {
         }
 
         const ui = Main.screenshotUI;
-        const primaryBin = ui._primaryMonitorBin;
-        if (!primaryBin)
+        const targetBin = this._binForStagePoint(stageX, stageY) ?? ui._primaryMonitorBin;
+        if (!targetBin)
             return;
 
-        const [ok, localX, localY] = primaryBin.transform_stage_point(stageX, stageY);
+        const [ok, localX, localY] = targetBin.transform_stage_point(stageX, stageY);
         if (!ok)
             return;
 
@@ -864,7 +1111,7 @@ export default class GradiaCompanion extends Extension {
         });
 
         entry.set_x_expand(false);
-        primaryBin.add_child(entry);
+        targetBin.add_child(entry);
         this._textEntry = entry;
         this._updateTextEntryStyle();
 
@@ -1099,6 +1346,11 @@ export default class GradiaCompanion extends Extension {
                 mode: Clutter.AnimationMode.EASE_OUT_QUAD,
             });
             this._resolutionOverlay?.onDragEnded();
+
+            const [x, y] = selector.getGeometry?.() ?? [0, 0];
+            const targetBin = this._binForStagePoint(x, y);
+            if (targetBin)
+                this._moveToolbarToMonitor(targetBin);
         });
     }
 
@@ -1140,7 +1392,10 @@ export default class GradiaCompanion extends Extension {
                 source: bin,
                 coordinate: Clutter.BindCoordinate.ALL,
             }));
-            ui.insert_child_below(canvas, ui._areaSelector);
+            if (ui._areaSelector)
+                ui.insert_child_above(canvas, ui._areaSelector);
+            else
+                ui.add_child(canvas);
             this._canvases.push(canvas);
 
             const overlay = new DrawingInputOverlay(canvas, {
@@ -1148,6 +1403,7 @@ export default class GradiaCompanion extends Extension {
             });
 
             overlay.connect('button-press-event', (_actor, event) => {
+                this._moveToolbarToMonitor(bin);
                 const tool = this._toolbar?.selectedTool;
 
                 if (tool === 'text') {
@@ -1166,6 +1422,7 @@ export default class GradiaCompanion extends Extension {
             });
 
             overlay.connect('motion-event', (_actor, event) => {
+                this._moveToolbarToMonitor(bin);
                 if (this._toolbar?.selectedTool === 'drag') {
                     const [stageX, stageY] = event.get_coords();
                     this._onDragToolMotion(stageX, stageY);
