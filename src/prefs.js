@@ -33,7 +33,6 @@ const AboutPage = GObject.registerClass(
             this._settings = settings;
             this._window = window;
             this._setupCss();
-            this._buildDonationGroup();
             this._buildTextRecognitionGroup();
             this._buildScreenshotGroup();
             this._buildScreenRecordingGroup();
@@ -56,53 +55,6 @@ const AboutPage = GObject.registerClass(
                 Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
             );
         }
-
-        _buildDonationGroup() {
-            const group = new Adw.PreferencesGroup();
-
-            const card = new Gtk.Box({
-                orientation: Gtk.Orientation.HORIZONTAL,
-                spacing: 12,
-                hexpand: true,
-                css_classes: ['donation-card'],
-            });
-
-            const labelBox = new Gtk.Box({
-                orientation: Gtk.Orientation.VERTICAL,
-                spacing: 2,
-                valign: Gtk.Align.CENTER,
-                hexpand: true,
-            });
-
-            const title = new Gtk.Label({
-                label: 'Support This Extension',
-                halign: Gtk.Align.START,
-                css_classes: ['title-4'],
-                wrap: true
-            });
-
-            const subtitle = new Gtk.Label({
-                label: 'If you enjoy my work, consider donating!',
-                halign: Gtk.Align.START,
-                wrap: true,
-            });
-
-            const button = new Gtk.LinkButton({
-                label: 'Donate',
-                uri: 'https://ko-fi.com/alexandervanhee',
-                valign: Gtk.Align.CENTER,
-                css_classes: ['pill'],
-            });
-
-            labelBox.append(title);
-            labelBox.append(subtitle);
-            card.append(labelBox);
-            card.append(button);
-
-            group.add(card);
-            this.add(group);
-        }
-
         _buildTextRecognitionGroup() {
             this._ocrGroup = new Adw.PreferencesGroup({ title: 'Text Recognition' });
             this.add(this._ocrGroup);

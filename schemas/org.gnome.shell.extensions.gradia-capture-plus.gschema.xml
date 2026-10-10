@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <schemalist>
-  <schema id="org.gnome.shell.extensions.gradia-companion" path="/org/gnome/shell/extensions/gradia-companion/">
+  <schema id="org.gnome.shell.extensions.gradia-capture-plus" path="/org/gnome/shell/extensions/gradia-capture-plus/">
     <key name="tool-settings" type="a{s(sd)}">
       <default>{'freehand': ('#000000', 3.0), 'rectangle': ('#000000', 3.0), 'solid-rectangle': ('#000000', 3.0), 'highlighter': ('#ffdd00', 4.0), 'arrow': ('#000000', 3.0), 'stamp': ('#000000', 3.0)}</default>
       <summary>Per-tool color and line width</summary>

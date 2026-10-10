@@ -4,6 +4,7 @@
 # This Script is released under GPL v3 license
 # Copyright (C) 2020-2025 Javad Rahmatzadeh
 # Copyright (C) 2025 Alexander Vanhee
+# Copyright (C) 2026 Shantanu Baviskar
 
 set -e
 cd "$( cd "$( dirname "$0" )" && pwd )"
@@ -15,13 +16,13 @@ gnome-extensions pack src \
     --extra-source="README.md" \
     $(find src -maxdepth 1 -name '*.js' ! -name 'extension.js' -printf '--extra-source=%f ') \
     --extra-source="../icons" \
-    --schema="../schemas/org.gnome.shell.extensions.gradia-companion.gschema.xml"
+    --schema="../schemas/org.gnome.shell.extensions.gradia-capture-plus.gschema.xml"
 echo "Packing Done!"
 
 while getopts i flag; do
     case $flag in
         i)  gnome-extensions install --force \
-                gradia-integration@alexandervanhee.github.io.shell-extension.zip && \
+                gradia-capture-plus@shantanub08.github.io.shell-extension.zip && \
             echo "Extension is installed. Now restart the GNOME Shell." || \
             { echo "ERROR: Could not install the extension!"; exit 1; };;
         *)  echo "ERROR: Invalid flag!"
