@@ -2,6 +2,7 @@ import Adw from 'gi://Adw';
 import Gtk from 'gi://Gtk';
 import Gdk from 'gi://Gdk';
 import Gio from 'gi://Gio';
+import GLib from 'gi://GLib';
 import GObject from 'gi://GObject';
 import GdkPixbuf from 'gi://GdkPixbuf';
 import { ExtensionPreferences } from 'resource:///org/gnome/Shell/Extensions/js/extensions/prefs.js';
@@ -24,16 +25,19 @@ function isGradiaInstalled() {
 
 const AboutPage = GObject.registerClass(
     class AboutPage extends Adw.PreferencesPage {
-        constructor(settings) {
+        constructor(settings, window = null) {
             super({
                 title: 'Preferences',
                 icon_name: 'org.gnome.Settings-symbolic',
             });
             this._settings = settings;
+            this._window = window;
             this._setupCss();
             this._buildDonationGroup();
             this._buildTextRecognitionGroup();
             this._buildScreenshotGroup();
+            this._buildScreenRecordingGroup();
+            this._buildCursorGroup();
         }
 
         _setupCss() {
@@ -194,10 +198,206 @@ const AboutPage = GObject.registerClass(
 
             this._settings.bind('play-sound', soundRow, 'active', Gio.SettingsBindFlags.DEFAULT);
 
+            const defaultPicturesDir = GLib.build_filenamev([
+                GLib.get_user_special_dir(GLib.UserDirectory.DIRECTORY_PICTURES) || GLib.get_home_dir(),
+                'Screenshots',
+            ]);
+
+            const screenshotDirRow = this._createDirectoryRow({
+                title: 'Save Folder',
+                settingsKey: 'screenshot-directory',
+                defaultPath: defaultPicturesDir,
+            });
+
             group.add(formatRow);
+            group.add(screenshotDirRow);
             group.add(clearSelectionRow);
             group.add(compositeWindowRow);
             group.add(soundRow);
+            this.add(group);
+        }
+
+        _buildScreenRecordingGroup() {
+            const group = new Adw.PreferencesGroup({ title: 'Screen Recording' });
+
+            const fpsRow = new Adw.ComboRow({
+                title: 'Frame Rate',
+                subtitle: 'Smoother recordings (60 FPS) require more CPU and storage',
+            });
+
+            const fpsOptions = [
+                { label: '30 FPS', value: 30 },
+                { label: '60 FPS', value: 60 },
+            ];
+
+            const model = new Gtk.StringList();
+            for (const opt of fpsOptions)
+                model.append(opt.label);
+
+            fpsRow.set_model(model);
+
+            const currentFps = this._settings.get_int('recording-fps');
+            const currentIndex = fpsOptions.findIndex(opt => opt.value === currentFps);
+            fpsRow.set_selected(currentIndex >= 0 ? currentIndex : 1);
+
+            fpsRow.connect('notify::selected', () => {
+                const selected = fpsOptions[fpsRow.get_selected()];
+                if (selected)
+                    this._settings.set_int('recording-fps', selected.value);
+            });
+
+            const defaultVideosDir = GLib.build_filenamev([
+                GLib.get_user_special_dir(GLib.UserDirectory.DIRECTORY_VIDEOS) || GLib.get_home_dir(),
+                'Screencasts',
+            ]);
+
+            const recordingDirRow = this._createDirectoryRow({
+                title: 'Save Folder',
+                settingsKey: 'recording-directory',
+                defaultPath: defaultVideosDir,
+            });
+
+            group.add(fpsRow);
+            group.add(recordingDirRow);
+            this.add(group);
+        }
+
+        _createDirectoryRow({ title, settingsKey, defaultPath }) {
+            const row = new Adw.ActionRow({
+                title,
+            });
+
+            const updateSubtitle = () => {
+                const custom = this._settings.get_string(settingsKey);
+                if (custom && custom.trim().length > 0)
+                    row.subtitle = custom;
+                else
+                    row.subtitle = `Default: ${defaultPath}`;
+            };
+            updateSubtitle();
+
+            const resetButton = new Gtk.Button({
+                icon_name: 'edit-clear-symbolic',
+                valign: Gtk.Align.CENTER,
+                tooltip_text: 'Reset to default folder',
+                css_classes: ['flat'],
+            });
+
+            const updateResetSensitivity = () => {
+                const custom = this._settings.get_string(settingsKey);
+                resetButton.sensitive = Boolean(custom && custom.trim().length > 0);
+            };
+            updateResetSensitivity();
+
+            resetButton.connect('clicked', () => {
+                this._settings.set_string(settingsKey, '');
+                updateSubtitle();
+                updateResetSensitivity();
+            });
+
+            const chooseButton = new Gtk.Button({
+                icon_name: 'folder-open-symbolic',
+                valign: Gtk.Align.CENTER,
+                tooltip_text: 'Choose custom folder',
+                css_classes: ['flat'],
+            });
+
+            chooseButton.connect('clicked', () => {
+                const parentWindow = this._window ?? this.get_root();
+                if (Gtk.FileDialog) {
+                    const dialog = new Gtk.FileDialog({
+                        title: `Select ${title}`,
+                        modal: true,
+                    });
+
+                    const currentPath = this._settings.get_string(settingsKey);
+                    if (currentPath && currentPath.trim().length > 0) {
+                        try {
+                            dialog.set_initial_folder(Gio.File.new_for_path(currentPath));
+                        } catch (e) {
+                            // ignore invalid path
+                        }
+                    }
+
+                    dialog.select_folder(parentWindow, null, (dlg, res) => {
+                        try {
+                            const folder = dlg.select_folder_finish(res);
+                            if (folder) {
+                                const path = folder.get_path();
+                                if (path) {
+                                    this._settings.set_string(settingsKey, path);
+                                    updateSubtitle();
+                                    updateResetSensitivity();
+                                }
+                            }
+                        } catch (e) {
+                            // Cancelled by user
+                        }
+                    });
+                }
+            });
+
+            row.add_suffix(resetButton);
+            row.add_suffix(chooseButton);
+
+            return row;
+        }
+
+        _buildCursorGroup() {
+            const group = new Adw.PreferencesGroup({
+                title: 'Cursor Scaling',
+                description: 'Fix or adjust pointer size in screenshots (useful for HiDPI / fractional scaling)',
+            });
+
+            const autoFixRow = new Adw.SwitchRow({
+                title: 'Auto-Fix Cursor Scale',
+                subtitle: 'Automatically normalize pointer size to standard 24px proportion',
+            });
+
+            const customScaleSwitchRow = new Adw.SwitchRow({
+                title: 'Custom Cursor Scale',
+                subtitle: 'Manually scale pointer size in screenshots',
+            });
+
+            const customScaleAdjustment = new Gtk.Adjustment({
+                lower: 0.25,
+                upper: 2.0,
+                step_increment: 0.05,
+                page_increment: 0.25,
+                value: this._settings.get_double('custom-cursor-scale'),
+            });
+
+            const customScaleSpinRow = new Adw.SpinRow({
+                title: 'Cursor Scale Factor',
+                subtitle: 'Multiplier applied to cursor size (e.g. 0.50 = 50%)',
+                adjustment: customScaleAdjustment,
+                digits: 2,
+            });
+
+            this._settings.bind('auto-fix-cursor-scale', autoFixRow, 'active', Gio.SettingsBindFlags.DEFAULT);
+            this._settings.bind('custom-cursor-scale-enabled', customScaleSwitchRow, 'active', Gio.SettingsBindFlags.DEFAULT);
+            this._settings.bind('custom-cursor-scale', customScaleAdjustment, 'value', Gio.SettingsBindFlags.DEFAULT);
+
+            autoFixRow.connect('notify::active', () => {
+                if (autoFixRow.active && customScaleSwitchRow.active)
+                    customScaleSwitchRow.active = false;
+            });
+
+            const updateCustomSensitivity = () => {
+                customScaleSpinRow.sensitive = customScaleSwitchRow.active;
+            };
+
+            customScaleSwitchRow.connect('notify::active', () => {
+                if (customScaleSwitchRow.active && autoFixRow.active)
+                    autoFixRow.active = false;
+                updateCustomSensitivity();
+            });
+
+            updateCustomSensitivity();
+
+            group.add(autoFixRow);
+            group.add(customScaleSwitchRow);
+            group.add(customScaleSpinRow);
             this.add(group);
         }
     });
@@ -284,7 +484,7 @@ const ShortcutsPage = GObject.registerClass(
 export default class GradiaPreferences extends ExtensionPreferences {
     fillPreferencesWindow(window) {
         const settings = this.getSettings();
-        window.add(new AboutPage(settings));
+        window.add(new AboutPage(settings, window));
         window.add(new ShortcutsPage());
     }
 }

@@ -76,15 +76,20 @@ async function _saveBytesToDir(dir, bytes, format) {
     return null;
 }
 
-function _saveToDiskAsync(bytes, format = 'png') {
+function _saveToDiskAsync(bytes, format = 'png', customDir = null) {
     const lockdownSettings = new Gio.Settings({schema_id: 'org.gnome.desktop.lockdown'});
     if (lockdownSettings.get_boolean('disable-save-to-disk'))
         return Promise.resolve(null);
 
-    const dir = Gio.File.new_for_path(GLib.build_filenamev([
-        GLib.get_user_special_dir(GLib.UserDirectory.DIRECTORY_PICTURES) || GLib.get_home_dir(),
-        'Screenshots',
-    ]));
+    let targetDir = customDir;
+    if (!targetDir || targetDir.trim().length === 0) {
+        targetDir = GLib.build_filenamev([
+            GLib.get_user_special_dir(GLib.UserDirectory.DIRECTORY_PICTURES) || GLib.get_home_dir(),
+            'Screenshots',
+        ]);
+    }
+
+    const dir = Gio.File.new_for_path(targetDir.trim());
 
     try {
         dir.make_directory_with_parents(null);
@@ -107,7 +112,7 @@ function _showToast(file, pixbuf, copyOnly) {
     showScreenshotToast(file, imageContent, pixbuf.width, pixbuf.height, copyOnly);
 }
 
-async function _storeScreenshotAsync(bytes, pixbuf, { copy = true, save = true, format = 'png', alreadyEncoded = false } = {}) {
+async function _storeScreenshotAsync(bytes, pixbuf, { copy = true, save = true, format = 'png', alreadyEncoded = false, customDir = null } = {}) {
     let finalBytes = bytes;
     if (format !== 'png' && !alreadyEncoded && save)
         finalBytes = await _pixbufSaveToStreamAsync(pixbuf, format);
@@ -119,7 +124,7 @@ async function _storeScreenshotAsync(bytes, pixbuf, { copy = true, save = true, 
 
     let file = null;
     if (save) {
-        file = await _saveToDiskAsync(finalBytes, format);
+        file = await _saveToDiskAsync(finalBytes, format, customDir);
         if (file)
             Main.screenshotUI.emit('screenshot-taken', file);
     }
@@ -234,7 +239,7 @@ async function _captureWindowComposite(windowEntries, cursor) {
     return { bytes, pixbuf: finalPixbuf };
 }
 
-export async function captureAndStoreScreenshot(texture, geometry, scale, cursor, compositeFn, windowComposite = null, { copy = true, save = true, externalSave = false, format = 'png', playSound = true } = {}) {
+export async function captureAndStoreScreenshot(texture, geometry, scale, cursor, compositeFn, windowComposite = null, { copy = true, save = true, externalSave = false, format = 'png', playSound = true, customDir = null } = {}) {
     if (playSound)
         global.display.get_sound_player().play_from_theme('screen-capture', 'Screenshot taken', null);
 
@@ -274,5 +279,5 @@ export async function captureAndStoreScreenshot(texture, geometry, scale, cursor
     if (externalSave)
         return _saveToUserChosenLocation(finalBytes, finalPixbuf, format);
 
-    return _storeScreenshotAsync(finalBytes, finalPixbuf, { copy, save, format, alreadyEncoded });
+    return _storeScreenshotAsync(finalBytes, finalPixbuf, { copy, save, format, alreadyEncoded, customDir });
 }

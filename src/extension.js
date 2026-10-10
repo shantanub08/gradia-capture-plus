@@ -1,7 +1,9 @@
 import { Extension } from 'resource:///org/gnome/shell/extensions/extension.js';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
+import { loadInterfaceXML } from 'resource:///org/gnome/shell/misc/fileUtils.js';
 import Clutter from 'gi://Clutter';
 import Cairo from 'gi://cairo';
+import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 import GObject from 'gi://GObject';
 import St from 'gi://St';
@@ -622,8 +624,11 @@ export default class GradiaCompanion extends Extension {
 
         this._selectionClearer = new SelectionClearer();
 
+        this._ensureScreencastSupported();
+
         Main.screenshotUI.open = async function (mode = 0, ...rest) {
             self._portalMode = (mode === 2);
+            self._ensureScreencastSupported();
             const result = await self._originalOpen(mode, ...rest);
             self._ensureUI();
             return result;
@@ -655,12 +660,115 @@ export default class GradiaCompanion extends Extension {
             this._closedId = null;
         }
 
+        this._unpatchScreencastProxy();
+
         this._gradiaSettings.destroy();
         this._gradiaSettings = null;
         this._settings = null;
         destroyActiveToast();
 
         this._removeUI();
+    }
+
+    _ensureScreencastSupported() {
+        const ui = Main.screenshotUI;
+        if (!ui)
+            return;
+
+        if (ui._screencastSupported && ui._screencastProxy?.g_name_owner) {
+            if (!this._patchedProxy && ui._screencastProxy)
+                this._patchScreencastProxy(ui._screencastProxy);
+            return;
+        }
+
+        try {
+            const ScreencastIface = loadInterfaceXML('org.gnome.Shell.Screencast');
+            const ScreencastProxy = Gio.DBusProxy.makeProxyWrapper(ScreencastIface);
+
+            const proxy = new ScreencastProxy(
+                Gio.DBus.session,
+                'org.gnome.Shell.Screencast',
+                '/org/gnome/Shell/Screencast',
+                (_object, error) => {
+                    if (error)
+                        return;
+
+                    if (proxy.ScreencastSupported) {
+                        ui._screencastProxy = proxy;
+                        ui._screencastSupported = true;
+                        ui._syncCastButton?.();
+                        this._patchScreencastProxy(proxy);
+                    }
+                }
+            );
+
+            proxy.connectSignal('Error', (_p, _sender, [errorName, message]) =>
+                ui._screencastFailed?.('RECORDING',
+                    Gio.DBusError.new_for_dbus_error(errorName, message)));
+
+            proxy.connect('notify::g-name-owner', () => {
+                if (proxy.g_name_owner || !ui._screencastInProgress || ui._screencastStarting)
+                    return;
+
+                ui._screencastFailed?.('RECORDING',
+                    new GLib.Error(Gio.DBusError, Gio.DBusError.FAILED,
+                        'Service crashed'));
+            });
+        } catch (e) {
+            // ignore
+        }
+    }
+
+    _patchScreencastProxy(proxy) {
+        if (!proxy || this._patchedProxy === proxy)
+            return;
+
+        this._patchedProxy = proxy;
+        this._originalScreencastAsync = proxy.ScreencastAsync;
+        this._originalScreencastAreaAsync = proxy.ScreencastAreaAsync;
+
+        const self = this;
+
+        proxy.ScreencastAsync = function (fileTemplate, options, ...rest) {
+            const [finalTemplate, finalOptions] = self._transformScreencastArgs(fileTemplate, options);
+            return self._originalScreencastAsync.call(this, finalTemplate, finalOptions, ...rest);
+        };
+
+        proxy.ScreencastAreaAsync = function (x, y, w, h, fileTemplate, options, ...rest) {
+            const [finalTemplate, finalOptions] = self._transformScreencastArgs(fileTemplate, options);
+            return self._originalScreencastAreaAsync.call(this, x, y, w, h, finalTemplate, finalOptions, ...rest);
+        };
+    }
+
+    _unpatchScreencastProxy() {
+        if (this._patchedProxy) {
+            if (this._originalScreencastAsync) {
+                this._patchedProxy.ScreencastAsync = this._originalScreencastAsync;
+                this._originalScreencastAsync = null;
+            }
+            if (this._originalScreencastAreaAsync) {
+                this._patchedProxy.ScreencastAreaAsync = this._originalScreencastAreaAsync;
+                this._originalScreencastAreaAsync = null;
+            }
+            this._patchedProxy = null;
+        }
+    }
+
+    _transformScreencastArgs(fileTemplate, options = {}) {
+        let finalTemplate = fileTemplate;
+        const customDir = this._settings?.get_string('recording-directory');
+        if (customDir && customDir.trim().length > 0) {
+            const basename = GLib.path_get_basename(fileTemplate);
+            finalTemplate = GLib.build_filenamev([customDir.trim(), basename]);
+        }
+
+        const fps = this._settings?.get_int('recording-fps') || 60;
+        const finalOptions = {
+            ...(options || {}),
+            'framerate': new GLib.Variant('i', fps),
+        };
+
+        return [finalTemplate, finalOptions];
     }
 
     _buildWindowComposite(ui) {
@@ -764,11 +872,12 @@ export default class GradiaCompanion extends Extension {
         const shouldSave = !copyOnly && !externalSave;
         const format = (this._portalMode || ocr) ? 'png' : this._settings.get_string('screenshot-format');
         const playSound = this._settings.get_boolean('play-sound');
+        const customDir = this._settings.get_string('screenshot-directory');
 
         const _capture = (texture, geometry, scale, cursor, compositeFn, windowComposite = null) => {
             const capturePromise = captureAndStoreScreenshot(
                 texture, geometry, scale, cursor, compositeFn, windowComposite,
-                { copy: shouldCopy, save: shouldSave, externalSave, format, playSound }
+                { copy: shouldCopy, save: shouldSave, externalSave, format, playSound, customDir }
             );
             // We have to await in portal mode to prevent a race condition where
             // the overlay gets closed before 'screenshot-taken' gets emitted, so the portal doesn't fail.
@@ -798,7 +907,7 @@ export default class GradiaCompanion extends Extension {
                     texture: cursorTexture ?? null,
                     x: selectedWindow.cursorPoint.x + selectedWindow.boundingBox.x,
                     y: selectedWindow.cursorPoint.y + selectedWindow.boundingBox.y,
-                    scale: ui._cursorScale,
+                    scale: this._getEffectiveCursorScale(ui._cursorScale),
                 };
                 return await _capture(null, null, 1, null, null, windowComposite);
             }
@@ -815,7 +924,7 @@ export default class GradiaCompanion extends Extension {
                     texture: cursorTexture ?? null,
                     x: selectedWindow.cursorPoint.x * selectedWindow.bufferScale,
                     y: selectedWindow.cursorPoint.y * selectedWindow.bufferScale,
-                    scale: ui._cursorScale,
+                    scale: this._getEffectiveCursorScale(ui._cursorScale),
                 },
                 null
             );
@@ -840,10 +949,31 @@ export default class GradiaCompanion extends Extension {
                 texture: cursorTexture ?? null,
                 x: ui._cursor.x * ui._scale,
                 y: ui._cursor.y * ui._scale,
-                scale: ui._cursorScale,
+                scale: this._getEffectiveCursorScale(ui._cursorScale),
             },
             strokeData ? (bytes, pixbuf) => this._compositeStrokesOntoPixbuf(bytes, pixbuf, strokeData) : null
         );
+    }
+
+    _getEffectiveCursorScale(baseScale) {
+        if (this._settings.get_boolean('auto-fix-cursor-scale')) {
+            try {
+                const interfaceSettings = new Gio.Settings({ schema_id: 'org.gnome.desktop.interface' });
+                const configuredSize = interfaceSettings.get_int('cursor-size');
+                const baseSize = configuredSize > 0 ? configuredSize : 24;
+                const ratio = Math.min(1.0, 24 / baseSize);
+                return baseScale * ratio;
+            } catch (e) {
+                return baseScale * 0.5;
+            }
+        }
+
+        if (this._settings.get_boolean('custom-cursor-scale-enabled')) {
+            const factor = Math.max(0.1, this._settings.get_double('custom-cursor-scale'));
+            return baseScale * factor;
+        }
+
+        return baseScale;
     }
 
     _binContainsStagePoint(bin, stageX, stageY) {

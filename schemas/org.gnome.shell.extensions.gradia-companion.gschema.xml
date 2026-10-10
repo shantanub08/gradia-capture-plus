@@ -21,5 +21,29 @@
       <default>true</default>
       <summary>Composite transient windows when capturing a window screenshot</summary>
     </key>
+    <key name="auto-fix-cursor-scale" type="b">
+      <default>true</default>
+      <summary>Automatically normalize cursor size to standard 24px proportion in screenshots</summary>
+    </key>
+    <key name="custom-cursor-scale-enabled" type="b">
+      <default>false</default>
+      <summary>Enable manual cursor scaling in screenshots</summary>
+    </key>
+    <key name="custom-cursor-scale" type="d">
+      <default>1.0</default>
+      <summary>Custom cursor scale factor for screenshots</summary>
+    </key>
+    <key name="screenshot-directory" type="s">
+      <default>''</default>
+      <summary>Custom directory for saving screenshots</summary>
+    </key>
+    <key name="recording-fps" type="i">
+      <default>60</default>
+      <summary>Framerate for screen recordings (30 or 60)</summary>
+    </key>
+    <key name="recording-directory" type="s">
+      <default>''</default>
+      <summary>Custom directory for saving screen recordings</summary>
+    </key>
   </schema>
 </schemalist>
