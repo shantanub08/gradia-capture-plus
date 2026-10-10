@@ -257,8 +257,16 @@ const AboutPage = GObject.registerClass(
                 defaultPath: defaultVideosDir,
             });
 
+            const autoHideDimmingRow = new Adw.SwitchRow({
+                title: 'Auto-Un-dim Screen',
+                subtitle: 'Temporarily hide software brightness dimming (e.g. Soft Brightness Plus) while recording',
+            });
+
+            this._settings.bind('auto-hide-soft-brightness', autoHideDimmingRow, 'active', Gio.SettingsBindFlags.DEFAULT);
+
             group.add(fpsRow);
             group.add(recordingDirRow);
+            group.add(autoHideDimmingRow);
             this.add(group);
         }
 

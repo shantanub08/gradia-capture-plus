@@ -45,5 +45,9 @@
       <default>''</default>
       <summary>Custom directory for saving screen recordings</summary>
     </key>
+    <key name="auto-hide-soft-brightness" type="b">
+      <default>true</default>
+      <summary>Temporarily disable software brightness dimming during screen recording</summary>
+    </key>
   </schema>
 </schemalist>

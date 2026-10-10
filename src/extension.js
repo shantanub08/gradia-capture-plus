@@ -638,6 +638,14 @@ export default class GradiaCompanion extends Extension {
             await self._captureScreenshot({ copyOnly: false });
         };
 
+        this._screencastProgressId = Main.screenshotUI.connect('notify::screencast-in-progress', () => {
+            this._handleScreencastProgressChanged();
+        });
+
+        this._autoHideSettingId = this._settings?.connect('changed::auto-hide-soft-brightness', () => {
+            this._handleScreencastProgressChanged();
+        });
+
         this._closedId = Main.screenshotUI.connect('closed', () => {
             self._portalMode = false;
             self._removeUI();
@@ -645,6 +653,18 @@ export default class GradiaCompanion extends Extension {
     }
 
     disable() {
+        if (this._screencastProgressId) {
+            Main.screenshotUI.disconnect(this._screencastProgressId);
+            this._screencastProgressId = null;
+        }
+
+        if (this._autoHideSettingId) {
+            this._settings?.disconnect(this._autoHideSettingId);
+            this._autoHideSettingId = null;
+        }
+
+        this._restoreDimmingOverlays();
+
         if (this._originalOpen) {
             Main.screenshotUI.open = this._originalOpen;
             this._originalOpen = null;
@@ -729,14 +749,34 @@ export default class GradiaCompanion extends Extension {
 
         const self = this;
 
-        proxy.ScreencastAsync = function (fileTemplate, options, ...rest) {
+        proxy.ScreencastAsync = async function (fileTemplate, options, ...rest) {
+            if (self._settings?.get_boolean('auto-hide-soft-brightness'))
+                self._hideDimmingOverlays();
             const [finalTemplate, finalOptions] = self._transformScreencastArgs(fileTemplate, options);
-            return self._originalScreencastAsync.call(this, finalTemplate, finalOptions, ...rest);
+            try {
+                return await self._originalScreencastAsync.call(this, finalTemplate, finalOptions, ...rest);
+            } catch (err) {
+                const inProgress = Main.screenshotUI?.screencast_in_progress ??
+                                   Main.screenshotUI?.['screencast-in-progress'] ?? false;
+                if (!inProgress)
+                    self._restoreDimmingOverlays();
+                throw err;
+            }
         };
 
-        proxy.ScreencastAreaAsync = function (x, y, w, h, fileTemplate, options, ...rest) {
+        proxy.ScreencastAreaAsync = async function (x, y, w, h, fileTemplate, options, ...rest) {
+            if (self._settings?.get_boolean('auto-hide-soft-brightness'))
+                self._hideDimmingOverlays();
             const [finalTemplate, finalOptions] = self._transformScreencastArgs(fileTemplate, options);
-            return self._originalScreencastAreaAsync.call(this, x, y, w, h, finalTemplate, finalOptions, ...rest);
+            try {
+                return await self._originalScreencastAreaAsync.call(this, x, y, w, h, finalTemplate, finalOptions, ...rest);
+            } catch (err) {
+                const inProgress = Main.screenshotUI?.screencast_in_progress ??
+                                   Main.screenshotUI?.['screencast-in-progress'] ?? false;
+                if (!inProgress)
+                    self._restoreDimmingOverlays();
+                throw err;
+            }
         };
     }
 
@@ -769,6 +809,88 @@ export default class GradiaCompanion extends Extension {
         };
 
         return [finalTemplate, finalOptions];
+    }
+
+    _handleScreencastProgressChanged() {
+        const inProgress = Main.screenshotUI?.screencast_in_progress ??
+                           Main.screenshotUI?.['screencast-in-progress'] ?? false;
+        if (inProgress) {
+            if (this._settings?.get_boolean('auto-hide-soft-brightness'))
+                this._hideDimmingOverlays();
+            else
+                this._restoreDimmingOverlays();
+        } else {
+            this._restoreDimmingOverlays();
+        }
+    }
+
+    _hideDimmingOverlays() {
+        if (this._dimmingOverlaysSuspended)
+            return;
+
+        this._dimmingOverlaysSuspended = true;
+
+        // 1. Hook into soft-brightness-plus extension if active
+        try {
+            const sbp = Main.extensionManager?.lookup?.('soft-brightness-plus@joelkitching.com')?.stateObj;
+            if (sbp) {
+                sbp._cursorManager?.setActive?.(false);
+                sbp._overlayManager?.hideOverlays?.(false);
+                this._sbpSuspended = true;
+            }
+        } catch (e) {
+            // ignore
+        }
+
+        // 2. Hide any dimmer overlay actors directly on stage
+        try {
+            this._suspendedStageActors = [];
+            const stageChildren = global.stage?.get_children?.() ?? [];
+            for (const child of stageChildren) {
+                const name = child.name || '';
+                if (name.includes('soft-brightness') || name.includes('dimmer')) {
+                    if (child.visible) {
+                        child.hide();
+                        this._suspendedStageActors.push(child);
+                    }
+                }
+            }
+        } catch (e) {
+            // ignore
+        }
+    }
+
+    _restoreDimmingOverlays() {
+        if (!this._dimmingOverlaysSuspended)
+            return;
+
+        this._dimmingOverlaysSuspended = false;
+
+        // 1. Restore any suspended stage actors
+        if (this._suspendedStageActors) {
+            for (const actor of this._suspendedStageActors) {
+                try {
+                    actor.show();
+                } catch (e) {
+                    // ignore
+                }
+            }
+            this._suspendedStageActors = [];
+        }
+
+        // 2. Restore soft-brightness-plus
+        if (this._sbpSuspended) {
+            this._sbpSuspended = false;
+            try {
+                const sbp = Main.extensionManager?.lookup?.('soft-brightness-plus@joelkitching.com')?.stateObj;
+                if (sbp) {
+                    sbp._cursorManager?.setActive?.(true);
+                    sbp._on_brightness_change?.(false);
+                }
+            } catch (e) {
+                // ignore
+            }
+        }
     }
 
     _buildWindowComposite(ui) {
