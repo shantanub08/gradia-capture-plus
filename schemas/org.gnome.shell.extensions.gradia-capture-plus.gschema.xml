@@ -6,7 +6,7 @@
       <summary>Per-tool color and line width</summary>
     </key>
     <key name="tool-hotkeys" type="a{ss}">
-      <default>{'select': 'q', 'drag': 'd', 'freehand': 'f', 'rectangle': 'r', 'solid-rectangle': 'b', 'highlighter': 'h', 'arrow': 'a', 'text': 't', 'stamp': 'n'}</default>
+      <default>{'select': 'q', 'drag': 'v', 'freehand': 'f', 'rectangle': 'r', 'solid-rectangle': 'b', 'highlighter': 'h', 'arrow': 'a', 'text': 't', 'stamp': 'n', 'toggle-recording': '`'}</default>
       <summary>Custom single-key shortcuts for tools</summary>
     </key>
     <key name="screenshot-format" type="s">

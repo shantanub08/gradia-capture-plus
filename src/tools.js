@@ -275,7 +275,7 @@ export const TOOLS = [
 
 export const DEFAULT_HOTKEYS = {
     'select': 'q',
-    'drag': 'd',
+    'drag': 'v',
     'freehand': 'f',
     'rectangle': 'r',
     'solid-rectangle': 'b',
@@ -283,13 +283,22 @@ export const DEFAULT_HOTKEYS = {
     'arrow': 'a',
     'text': 't',
     'stamp': 'n',
+    'toggle-recording': '`',
 };
 
 export function getToolShortcutSyms(keyChar) {
     if (!keyChar || typeof keyChar !== 'string')
         return [];
-    const lower = keyChar.toLowerCase();
-    const upper = keyChar.toUpperCase();
+    const trimmed = keyChar.trim();
+    if (!trimmed)
+        return [];
+    if (trimmed === '`' || trimmed === '~') {
+        const graveSym = Clutter.KEY_grave ?? 0x0060;
+        const tildeSym = Clutter.KEY_asciitilde ?? 0x007e;
+        return [graveSym, tildeSym, 0xfe50, 0xfe53];
+    }
+    const lower = trimmed.toLowerCase();
+    const upper = trimmed.toUpperCase();
     const syms = [lower.charCodeAt(0)];
     if (upper !== lower)
         syms.push(upper.charCodeAt(0));
@@ -311,6 +320,14 @@ export function buildEffectiveToolShortcuts(customHotkeys = {}) {
         [Clutter.KEY_9, Clutter.KEY_ccedilla],
     ];
 
+    const getHotkey = id => {
+        if (customHotkeys instanceof Map)
+            return customHotkeys.get(id) ?? DEFAULT_HOTKEYS[id];
+        if (customHotkeys && typeof customHotkeys === 'object')
+            return customHotkeys[id] ?? DEFAULT_HOTKEYS[id];
+        return DEFAULT_HOTKEYS[id];
+    };
+
     for (let i = 0; i < TOOLS.length; i++) {
         const tool = TOOLS[i];
         if (numberKeyList[i]) {
@@ -318,11 +335,17 @@ export function buildEffectiveToolShortcuts(customHotkeys = {}) {
                 map[sym] = tool.id;
         }
 
-        const hotkey = customHotkeys[tool.id] ?? DEFAULT_HOTKEYS[tool.id];
+        const hotkey = getHotkey(tool.id);
         if (hotkey) {
             for (const sym of getToolShortcutSyms(hotkey))
                 map[sym] = tool.id;
         }
+    }
+
+    const recordingHotkey = getHotkey('toggle-recording');
+    if (recordingHotkey) {
+        for (const sym of getToolShortcutSyms(recordingHotkey))
+            map[sym] = 'toggle-recording';
     }
 
     return map;

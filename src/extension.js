@@ -2990,7 +2990,18 @@ export default class GradiaCompanion extends Extension {
             }
 
             if (!ctrl && this._toolShortcuts && (sym in this._toolShortcuts)) {
-                this._toolbar._onToolClicked(this._toolShortcuts[sym]);
+                const target = this._toolShortcuts[sym];
+                if (target === 'toggle-recording') {
+                    const castBtn = ui._castButton ?? ui._screencastButton;
+                    if (castBtn)
+                        castBtn.checked = !castBtn.checked;
+                    return Clutter.EVENT_STOP;
+                }
+                this._toolbar._onToolClicked(target);
+                return Clutter.EVENT_STOP;
+            }
+
+            if (!ctrl && (sym === Clutter.KEY_v || sym === Clutter.KEY_V)) {
                 return Clutter.EVENT_STOP;
             }
 

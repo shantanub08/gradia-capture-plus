@@ -463,7 +463,7 @@ const AboutPage = GObject.registerClass(
 
 const TOOL_DEFINITIONS = [
     { id: 'select', name: 'Crop Tool', defaultKey: 'q', numKey: '1' },
-    { id: 'drag', name: 'Object Selection Tool', defaultKey: 'd', numKey: '2' },
+    { id: 'drag', name: 'Object Selection Tool', defaultKey: 'v', numKey: '2' },
     { id: 'freehand', name: 'Freehand Tool', defaultKey: 'f', numKey: '3' },
     { id: 'rectangle', name: 'Rectangle Tool', defaultKey: 'r', numKey: '4' },
     { id: 'solid-rectangle', name: 'Solid Rectangle Tool', defaultKey: 'b', numKey: '5' },
@@ -471,7 +471,10 @@ const TOOL_DEFINITIONS = [
     { id: 'arrow', name: 'Arrow Tool', defaultKey: 'a', numKey: '7' },
     { id: 'text', name: 'Text Tool', defaultKey: 't', numKey: '8' },
     { id: 'stamp', name: 'Number Stamp Tool', defaultKey: 'n', numKey: '9' },
+    { id: 'toggle-recording', name: 'Toggle Screen Recording', defaultKey: '`', numKey: null },
 ];
+
+const RESERVED_KEYS = new Set(['s', 'c', 'w', 'p']);
 
 const ShortcutsPage = GObject.registerClass(
     class ShortcutsPage extends Adw.PreferencesPage {
@@ -491,7 +494,6 @@ const ShortcutsPage = GObject.registerClass(
                 ['Screen Selection',           'c'],
                 ['Window Selection',           'w'],
                 ['Toggle Pointer Visibility',  'p'],
-                ['Toggle Screen Recording',    'v'],
             ]);
 
             this._addGroup('General Annotation', [
@@ -517,15 +519,13 @@ const ShortcutsPage = GObject.registerClass(
             return map;
         }
 
-        _saveToolHotkey(toolId, key) {
+        _saveToolHotkeys(map) {
             if (!this._settings) return;
-            const map = this._loadToolHotkeys();
-            map.set(toolId, key.toLowerCase());
             const entries = [];
             for (const [tId, k] of map) {
                 entries.push(GLib.Variant.new_dict_entry(
                     GLib.Variant.new_string(tId),
-                    GLib.Variant.new_string(k)
+                    GLib.Variant.new_string(k ?? '')
                 ));
             }
             this._settings.set_value('tool-hotkeys', GLib.Variant.new_array(
@@ -534,18 +534,28 @@ const ShortcutsPage = GObject.registerClass(
             ));
         }
 
+        _saveToolHotkey(toolId, key) {
+            if (!this._settings) return;
+            const map = this._loadToolHotkeys();
+            map.set(toolId, (key ?? '').toLowerCase());
+            this._saveToolHotkeys(map);
+        }
+
         _buildToolHotkeysGroup() {
             const group = new Adw.PreferencesGroup({
                 title: 'Tool Hotkeys',
-                description: 'Customize single-key shortcuts for each tool. Number keys (1–9) remain available as alternates.',
+                description: 'Customize single-key shortcuts for each tool and action. Number keys (1–9) remain available as alternates.',
             });
 
             const currentMap = this._loadToolHotkeys();
+            const entryWidgets = new Map();
 
             for (const tool of TOOL_DEFINITIONS) {
                 const row = new Adw.ActionRow({
                     title: tool.name,
-                    subtitle: `Alternate shortcut: ${tool.numKey}`,
+                    subtitle: tool.numKey
+                        ? `Alternate shortcut: ${tool.numKey}`
+                        : 'Toggle between screenshot and recording',
                 });
 
                 const entry = new Gtk.Entry({
@@ -553,35 +563,85 @@ const ShortcutsPage = GObject.registerClass(
                     width_chars: 2,
                     xalign: 0.5,
                     valign: Gtk.Align.CENTER,
-                    tooltip_text: 'Type a single key to activate this tool',
+                    tooltip_text: tool.numKey
+                        ? 'Type a single key to activate this tool'
+                        : 'Type a single key to toggle screen recording',
                 });
+                entryWidgets.set(tool.id, entry);
 
-                const currentKey = currentMap.get(tool.id) ?? tool.defaultKey;
-                entry.set_text(currentKey.toUpperCase());
+                const currentKey = currentMap.has(tool.id) ? currentMap.get(tool.id) : tool.defaultKey;
+                entry.set_text(currentKey ? (currentKey === '`' ? '`' : currentKey.toUpperCase()) : '');
 
                 entry.connect('changed', () => {
                     const text = entry.get_text().trim();
-                    if (text.length > 0) {
-                        const char = text[text.length - 1];
-                        if (/^[a-zA-Z0-9]$/.test(char)) {
-                            entry.set_text(char.toUpperCase());
-                            this._saveToolHotkey(tool.id, char.toLowerCase());
-                        } else {
+                    if (text.length === 0) {
+                        this._saveToolHotkey(tool.id, '');
+                        return;
+                    }
+
+                    const rawChar = text[text.length - 1];
+                    let char = rawChar;
+                    if (char === '~' || char === '`')
+                        char = '`';
+
+                    if (/^[a-zA-Z0-9`]$/.test(char)) {
+                        const lowerChar = char.toLowerCase();
+                        if (RESERVED_KEYS.has(lowerChar)) {
+                            // Reserved by system (s, c, w, p)
                             const prev = this._loadToolHotkeys().get(tool.id) ?? tool.defaultKey;
-                            entry.set_text(prev.toUpperCase());
+                            entry.set_text(prev ? (prev === '`' ? '`' : prev.toUpperCase()) : '');
+                            return;
                         }
+
+                        const displayText = char === '`' ? '`' : char.toUpperCase();
+                        if (entry.get_text() !== displayText)
+                            entry.set_text(displayText);
+
+                        // Resolve conflicts: clear any other tool using this key
+                        const map = this._loadToolHotkeys();
+                        for (const [otherId, otherKey] of map) {
+                            if (otherId !== tool.id && otherKey.toLowerCase() === lowerChar) {
+                                map.set(otherId, '');
+                                const otherEntry = entryWidgets.get(otherId);
+                                if (otherEntry && otherEntry.get_text() !== '')
+                                    otherEntry.set_text('');
+                            }
+                        }
+                        map.set(tool.id, lowerChar);
+                        this._saveToolHotkeys(map);
+                    } else {
+                        const prev = this._loadToolHotkeys().get(tool.id) ?? tool.defaultKey;
+                        entry.set_text(prev ? (prev === '`' ? '`' : prev.toUpperCase()) : '');
                     }
                 });
+
+                const resetTooltip = tool.defaultKey === '`'
+                    ? 'Reset to default (`)'
+                    : `Reset to default (${tool.defaultKey.toUpperCase()})`;
 
                 const resetBtn = new Gtk.Button({
                     icon_name: 'edit-undo-symbolic',
                     valign: Gtk.Align.CENTER,
-                    tooltip_text: `Reset to default (${tool.defaultKey.toUpperCase()})`,
+                    tooltip_text: resetTooltip,
                     css_classes: ['flat'],
                 });
                 resetBtn.connect('clicked', () => {
-                    entry.set_text(tool.defaultKey.toUpperCase());
-                    this._saveToolHotkey(tool.id, tool.defaultKey);
+                    const defaultText = tool.defaultKey === '`' ? '`' : tool.defaultKey.toUpperCase();
+                    const lowerDefault = tool.defaultKey.toLowerCase();
+
+                    // Resolve conflicts with default key
+                    const map = this._loadToolHotkeys();
+                    for (const [otherId, otherKey] of map) {
+                        if (otherId !== tool.id && otherKey.toLowerCase() === lowerDefault) {
+                            map.set(otherId, '');
+                            const otherEntry = entryWidgets.get(otherId);
+                            if (otherEntry && otherEntry.get_text() !== '')
+                                otherEntry.set_text('');
+                        }
+                    }
+                    map.set(tool.id, lowerDefault);
+                    this._saveToolHotkeys(map);
+                    entry.set_text(defaultText);
                 });
 
                 row.add_suffix(entry);

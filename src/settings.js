@@ -98,7 +98,9 @@ export class GradiaSettings {
 
     getToolHotkey(toolId, defaultKey = '') {
         const map = this.loadToolHotkeys();
-        return map.get(toolId) ?? defaultKey;
+        if (map.has(toolId))
+            return map.get(toolId);
+        return defaultKey;
     }
 
     destroy() {
