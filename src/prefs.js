@@ -362,13 +362,26 @@ const AboutPage = GObject.registerClass(
         }
     });
 
+const TOOL_DEFINITIONS = [
+    { id: 'select', name: 'Crop Tool', defaultKey: 'q', numKey: '1' },
+    { id: 'drag', name: 'Object Selection Tool', defaultKey: 'd', numKey: '2' },
+    { id: 'freehand', name: 'Freehand Tool', defaultKey: 'f', numKey: '3' },
+    { id: 'rectangle', name: 'Rectangle Tool', defaultKey: 'r', numKey: '4' },
+    { id: 'solid-rectangle', name: 'Solid Rectangle Tool', defaultKey: 'b', numKey: '5' },
+    { id: 'highlighter', name: 'Highlighter Tool', defaultKey: 'h', numKey: '6' },
+    { id: 'arrow', name: 'Arrow Tool', defaultKey: 'a', numKey: '7' },
+    { id: 'text', name: 'Text Tool', defaultKey: 't', numKey: '8' },
+    { id: 'stamp', name: 'Number Stamp Tool', defaultKey: 'n', numKey: '9' },
+];
+
 const ShortcutsPage = GObject.registerClass(
     class ShortcutsPage extends Adw.PreferencesPage {
-        constructor() {
+        constructor(settings = null) {
             super({
                 title: 'Shortcuts',
                 icon_name: 'preferences-desktop-keyboard-shortcuts-symbolic',
             });
+            this._settings = settings;
 
             this._addGroup('Screenshot Mode', [
                 ['Take Screenshot / Capture',  'Return space'],
@@ -382,21 +395,102 @@ const ShortcutsPage = GObject.registerClass(
                 ['Toggle Screen Recording',    'v'],
             ]);
 
-            this._addGroup('Annotations', [
+            this._addGroup('General Annotation', [
                 ['Undo Last Stroke',     '<Control>z'],
                 ['Delete Selected',      'Delete BackSpace'],
-                ['Crop Tool',            '1 q'],
-                ['Drag Tool',            '2 d'],
-                ['Freehand Tool',        '3 f'],
-                ['Rectangle Tool',       '4 r'],
-                ['Solid Rectangle Tool', '5 b'],
-                ['Highlighter Tool',     '6 h'],
-                ['Arrow Tool',           '7 a'],
-                ['Text Tool',            '8 t'],
-                ['Number Stamp Tool',    '9 n'],
             ]);
 
+            this._buildToolHotkeysGroup();
             this._addSystemKeybindingsGroup();
+        }
+
+        _loadToolHotkeys() {
+            if (!this._settings) return new Map();
+            const variant = this._settings.get_value('tool-hotkeys');
+            const map = new Map();
+            const nChildren = variant.n_children();
+            for (let i = 0; i < nChildren; i++) {
+                const entry = variant.get_child_value(i);
+                const toolId = entry.get_child_value(0).get_string()[0];
+                const key = entry.get_child_value(1).get_string()[0];
+                map.set(toolId, key);
+            }
+            return map;
+        }
+
+        _saveToolHotkey(toolId, key) {
+            if (!this._settings) return;
+            const map = this._loadToolHotkeys();
+            map.set(toolId, key.toLowerCase());
+            const entries = [];
+            for (const [tId, k] of map) {
+                entries.push(GLib.Variant.new_dict_entry(
+                    GLib.Variant.new_string(tId),
+                    GLib.Variant.new_string(k)
+                ));
+            }
+            this._settings.set_value('tool-hotkeys', GLib.Variant.new_array(
+                GLib.VariantType.new('{ss}'),
+                entries
+            ));
+        }
+
+        _buildToolHotkeysGroup() {
+            const group = new Adw.PreferencesGroup({
+                title: 'Tool Hotkeys',
+                description: 'Customize single-key shortcuts for each tool. Number keys (1–9) remain available as alternates.',
+            });
+
+            const currentMap = this._loadToolHotkeys();
+
+            for (const tool of TOOL_DEFINITIONS) {
+                const row = new Adw.ActionRow({
+                    title: tool.name,
+                    subtitle: `Alternate shortcut: ${tool.numKey}`,
+                });
+
+                const entry = new Gtk.Entry({
+                    max_length: 1,
+                    width_chars: 2,
+                    xalign: 0.5,
+                    valign: Gtk.Align.CENTER,
+                    tooltip_text: 'Type a single key to activate this tool',
+                });
+
+                const currentKey = currentMap.get(tool.id) ?? tool.defaultKey;
+                entry.set_text(currentKey.toUpperCase());
+
+                entry.connect('changed', () => {
+                    const text = entry.get_text().trim();
+                    if (text.length > 0) {
+                        const char = text[text.length - 1];
+                        if (/^[a-zA-Z0-9]$/.test(char)) {
+                            entry.set_text(char.toUpperCase());
+                            this._saveToolHotkey(tool.id, char.toLowerCase());
+                        } else {
+                            const prev = this._loadToolHotkeys().get(tool.id) ?? tool.defaultKey;
+                            entry.set_text(prev.toUpperCase());
+                        }
+                    }
+                });
+
+                const resetBtn = new Gtk.Button({
+                    icon_name: 'edit-undo-symbolic',
+                    valign: Gtk.Align.CENTER,
+                    tooltip_text: `Reset to default (${tool.defaultKey.toUpperCase()})`,
+                    css_classes: ['flat'],
+                });
+                resetBtn.connect('clicked', () => {
+                    entry.set_text(tool.defaultKey.toUpperCase());
+                    this._saveToolHotkey(tool.id, tool.defaultKey);
+                });
+
+                row.add_suffix(entry);
+                row.add_suffix(resetBtn);
+                group.add(row);
+            }
+
+            this.add(group);
         }
 
         _addGroup(title, entries, note = null) {
@@ -445,6 +539,6 @@ export default class GradiaPreferences extends ExtensionPreferences {
     fillPreferencesWindow(window) {
         const settings = this.getSettings();
         window.add(new AboutPage(settings, window));
-        window.add(new ShortcutsPage());
+        window.add(new ShortcutsPage(settings));
     }
 }

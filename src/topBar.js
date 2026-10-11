@@ -5,7 +5,7 @@ import St from 'gi://St';
 
 import {Slider} from 'resource:///org/gnome/shell/ui/slider.js';
 
-import { TOOLS } from './tools.js';
+import { TOOLS, DEFAULT_HOTKEYS } from './tools.js';
 import { attachTooltip } from './tooltip.js';
 
 export const TRASH_BUTTON_RADIUS = 16;
@@ -77,6 +77,11 @@ export const Toolbar = GObject.registerClass({
 
         this._restoreToolEntry(this._selectedTool);
         this._updateDrawingControlsSensitivity();
+        this._updateTooltips();
+
+        this._hotkeySettingsId = this._settings?._settings?.connect('changed::tool-hotkeys', () => {
+            this._updateTooltips();
+        });
     }
 
     _currentToolIsDrawing() {
@@ -145,7 +150,7 @@ export const Toolbar = GObject.registerClass({
             this.add_child(btn);
             this._toolButtons.push(btn);
 
-            btn._tooltip = attachTooltip(btn, tool.name);
+            btn._tooltip = attachTooltip(btn, this._getToolTooltipText(tool.id, tool.name));
 
             if (i === 1)
                 this._addSeparator();
@@ -240,11 +245,38 @@ export const Toolbar = GObject.registerClass({
         this._saveCurrentToolEntry();
     }
 
+    _getToolTooltipText(toolId, toolName) {
+        const key = this._settings?.getToolHotkey(toolId, DEFAULT_HOTKEYS[toolId] ?? '') ?? (DEFAULT_HOTKEYS[toolId] ?? '');
+        return key ? `${toolName} (${key.toUpperCase()})` : toolName;
+    }
+
+    _updateTooltips() {
+        for (const btn of this._toolButtons) {
+            const tool = TOOLS.find(t => t.id === btn._toolId);
+            if (!tool) continue;
+            let name = tool.name;
+            if (btn._toolId === 'select' && btn._isDisplayPicker)
+                name = 'Pick Display';
+            btn._tooltip.text = this._getToolTooltipText(btn._toolId, name);
+        }
+    }
+
     setSelectionToolVisible(enabled) {
         const btn = this._toolButtons.find(b => b._toolId === 'select');
+        if (!btn) return;
         const iconName = enabled ? 'icons/selection-opaque-3-symbolic.svg' : 'icons/display-symbolic.svg';
         btn.get_child().gicon = Gio.Icon.new_for_string(`${this._extensionPath}/${iconName}`);
-        btn._tooltip.text = enabled ? 'Crop' : 'Pick Display';
+        btn._isDisplayPicker = !enabled;
+        const name = enabled ? 'Crop' : 'Pick Display';
+        btn._tooltip.text = this._getToolTooltipText('select', name);
+    }
+
+    destroy() {
+        if (this._hotkeySettingsId && this._settings?._settings) {
+            this._settings._settings.disconnect(this._hotkeySettingsId);
+            this._hotkeySettingsId = null;
+        }
+        super.destroy();
     }
 
     scrollLineWidth(direction) {

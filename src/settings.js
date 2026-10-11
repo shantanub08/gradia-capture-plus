@@ -56,6 +56,51 @@ export class GradiaSettings {
         return map.get(toolId) ?? { color: defaultColor, lineWidth: defaultLineWidth };
     }
 
+    loadToolHotkeys() {
+        const variant = this._settings.get_value('tool-hotkeys');
+        const map = new Map();
+
+        const nChildren = variant.n_children();
+        for (let i = 0; i < nChildren; i++) {
+            const entry = variant.get_child_value(i);
+            const toolId = entry.get_child_value(0).get_string()[0];
+            const key = entry.get_child_value(1).get_string()[0];
+            map.set(toolId, key);
+        }
+
+        return map;
+    }
+
+    saveToolHotkeys(map) {
+        const entries = [];
+
+        for (const [toolId, key] of map) {
+            const entry = GLib.Variant.new_dict_entry(
+                GLib.Variant.new_string(toolId),
+                GLib.Variant.new_string(key)
+            );
+            entries.push(entry);
+        }
+
+        const variant = GLib.Variant.new_array(
+            GLib.VariantType.new('{ss}'),
+            entries
+        );
+
+        this._settings.set_value('tool-hotkeys', variant);
+    }
+
+    saveToolHotkey(toolId, key) {
+        const map = this.loadToolHotkeys();
+        map.set(toolId, key);
+        this.saveToolHotkeys(map);
+    }
+
+    getToolHotkey(toolId, defaultKey = '') {
+        const map = this.loadToolHotkeys();
+        return map.get(toolId) ?? defaultKey;
+    }
+
     destroy() {
         this._settings = null;
     }

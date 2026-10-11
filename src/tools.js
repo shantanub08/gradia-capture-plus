@@ -6,6 +6,8 @@ import Clutter from 'gi://Clutter';
 export const SELECTION_PADDING = 8;
 
 function hexToRgb(hex) {
+    if (!hex || typeof hex !== 'string' || !hex.startsWith('#') || hex.length < 7)
+        return { r: 0, g: 0, b: 0 };
     return {
         r: parseInt(hex.slice(1, 3), 16) / 255,
         g: parseInt(hex.slice(3, 5), 16) / 255,
@@ -52,7 +54,7 @@ export const TOOLS = [
     },
     {
         id: 'drag',
-        name: 'Drag',
+        name: 'Object Selection',
         icon: 'icons/pointer-primary-click-symbolic.svg',
         keybindings: [Clutter.KEY_2, Clutter.KEY_eacute, Clutter.KEY_d],
         isDrawing: false,
@@ -271,6 +273,60 @@ export const TOOLS = [
     },
 ];
 
-export const TOOL_SHORTCUTS = Object.fromEntries(
-    TOOLS.flatMap(t => t.keybindings.map(key => [key, t.id]))
-);
+export const DEFAULT_HOTKEYS = {
+    'select': 'q',
+    'drag': 'd',
+    'freehand': 'f',
+    'rectangle': 'r',
+    'solid-rectangle': 'b',
+    'highlighter': 'h',
+    'arrow': 'a',
+    'text': 't',
+    'stamp': 'n',
+};
+
+export function getToolShortcutSyms(keyChar) {
+    if (!keyChar || typeof keyChar !== 'string')
+        return [];
+    const lower = keyChar.toLowerCase();
+    const upper = keyChar.toUpperCase();
+    const syms = [lower.charCodeAt(0)];
+    if (upper !== lower)
+        syms.push(upper.charCodeAt(0));
+    return syms;
+}
+
+export function buildEffectiveToolShortcuts(customHotkeys = {}) {
+    const map = {};
+
+    const numberKeyList = [
+        [Clutter.KEY_1, Clutter.KEY_ampersand],
+        [Clutter.KEY_2, Clutter.KEY_eacute],
+        [Clutter.KEY_3, Clutter.KEY_quotedbl],
+        [Clutter.KEY_4, Clutter.KEY_apostrophe],
+        [Clutter.KEY_5, Clutter.KEY_parenleft],
+        [Clutter.KEY_6, Clutter.KEY_section],
+        [Clutter.KEY_7, Clutter.KEY_egrave],
+        [Clutter.KEY_8, Clutter.KEY_exclam],
+        [Clutter.KEY_9, Clutter.KEY_ccedilla],
+    ];
+
+    for (let i = 0; i < TOOLS.length; i++) {
+        const tool = TOOLS[i];
+        if (numberKeyList[i]) {
+            for (const sym of numberKeyList[i])
+                map[sym] = tool.id;
+        }
+
+        const hotkey = customHotkeys[tool.id] ?? DEFAULT_HOTKEYS[tool.id];
+        if (hotkey) {
+            for (const sym of getToolShortcutSyms(hotkey))
+                map[sym] = tool.id;
+        }
+    }
+
+    return map;
+}
+
+export const TOOL_SHORTCUTS = buildEffectiveToolShortcuts();
+
