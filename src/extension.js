@@ -65,7 +65,7 @@ function getStrokePadding(toolId, strokeWidth) {
 
 const HANDLE_RADIUS = 4.5;
 const HANDLE_HIT_RADIUS = 10;
-const MIN_DISTANCE_SQ = 4;
+const MIN_DISTANCE_SQ = 16;
 const SELECTION_BOX_PADDING = 4;
 
 function getRectangleBounds(stroke) {
@@ -199,6 +199,103 @@ const ActiveArea = GObject.registerClass(
     }
 );
 
+const RectanglePreviewActor = GObject.registerClass(
+    class RectanglePreviewActor extends St.Widget {
+        _init() {
+            super._init({
+                reactive: false,
+                visible: false,
+                style: 'background-color: transparent;',
+            });
+
+            this._shapeBox = new St.Widget({
+                reactive: false,
+                visible: false,
+            });
+            this.add_child(this._shapeBox);
+
+            this._selectionBox = new St.Widget({
+                reactive: false,
+                visible: false,
+                style: 'background-color: transparent; border: 1.5px solid #3584e4;',
+            });
+            this.add_child(this._selectionBox);
+
+            this._handleActors = [];
+            for (let i = 0; i < 8; i++) {
+                const h = new St.Widget({
+                    reactive: false,
+                    visible: false,
+                    style: 'background-color: #ffffff; border: 1.5px solid #3584e4;',
+                });
+                h.set_size(HANDLE_RADIUS * 2, HANDLE_RADIUS * 2);
+                this.add_child(h);
+                this._handleActors.push(h);
+            }
+        }
+
+        updateFromStroke(stroke, ox, oy, showHandles = false) {
+            if (!stroke?.stagePoints || stroke.stagePoints.length < 2)
+                return;
+
+            const p0 = stroke.stagePoints[0];
+            const p1 = stroke.stagePoints[stroke.stagePoints.length - 1];
+            const minX = Math.min(p0.x, p1.x);
+            const maxX = Math.max(p0.x, p1.x);
+            const minY = Math.min(p0.y, p1.y);
+            const maxY = Math.max(p0.y, p1.y);
+
+            const localX = Math.round(minX - ox);
+            const localY = Math.round(minY - oy);
+            const localW = Math.max(1, Math.round(maxX - minX));
+            const localH = Math.max(1, Math.round(maxY - minY));
+
+            const isSolid = (stroke.toolId === 'solid-rectangle');
+            const color = stroke.color ?? '#000000';
+            const lineWidth = stroke.strokeWidth ?? 3;
+
+            if (isSolid) {
+                this._shapeBox.set_style(`background-color: ${color}; border: none;`);
+            } else {
+                this._shapeBox.set_style(`background-color: transparent; border: ${lineWidth}px solid ${color};`);
+            }
+
+            this._shapeBox.set_position(localX, localY);
+            this._shapeBox.set_size(localW, localH);
+            this._shapeBox.show();
+
+            if (showHandles) {
+                const padded = getPaddedSelectionBounds(stroke);
+                if (padded) {
+                    const padX = Math.round(padded.minX - ox);
+                    const padY = Math.round(padded.minY - oy);
+                    const padW = Math.max(1, Math.round(padded.maxX - padded.minX));
+                    const padH = Math.max(1, Math.round(padded.maxY - padded.minY));
+
+                    this._selectionBox.set_position(padX, padY);
+                    this._selectionBox.set_size(padW, padH);
+                    this._selectionBox.show();
+
+                    const handles = getRectangleHandles(padded);
+                    for (let i = 0; i < handles.length && i < this._handleActors.length; i++) {
+                        const h = handles[i];
+                        const ha = this._handleActors[i];
+                        ha.set_position(
+                            Math.round(h.x - ox - HANDLE_RADIUS),
+                            Math.round(h.y - oy - HANDLE_RADIUS)
+                        );
+                        ha.show();
+                    }
+                }
+            } else {
+                this._selectionBox.hide();
+                for (const ha of this._handleActors)
+                    ha.hide();
+            }
+        }
+    }
+);
+
 const BrushCursorIndicator = GObject.registerClass(
     class BrushCursorIndicator extends St.DrawingArea {
         _init() {
@@ -289,6 +386,8 @@ const DrawingCanvas = GObject.registerClass(
             this._stampCounter = 1;
             this._selectedStroke = null;
             this._activeBBox = null;
+            this._prevActiveBBox = null;
+            this._transformHiddenStroke = null;
             this._transformMode = null;
             this._transformHandle = null;
             this._transformStartX = 0;
@@ -299,22 +398,65 @@ const DrawingCanvas = GObject.registerClass(
 
             this._originX = undefined;
             this._originY = undefined;
+            this._renderScaleX = 1.0;
+            this._renderScaleY = 1.0;
+            this._actorScaleX = 1.0;
+            this._actorScaleY = 1.0;
 
             this._committedArea = new CommittedArea(this);
             this._committedArea.set_position(0, 0);
-            this._committedArea.add_constraint(new Clutter.BindConstraint({
-                source: this,
-                coordinate: Clutter.BindCoordinate.SIZE,
-            }));
+            this._committedArea.set_pivot_point(0, 0);
             this.add_child(this._committedArea);
 
             this._activeArea = new ActiveArea(this);
+            this._activeArea.set_position(0, 0);
+            this._activeArea.set_pivot_point(0, 0);
             this.add_child(this._activeArea);
+
+            this._previewActor = new RectanglePreviewActor();
+            this.add_child(this._previewActor);
 
             this.connect('notify::allocation', () => {
                 this._updateOrigin();
+                this._updateDimensions();
                 this._committedArea.queue_repaint();
             });
+        }
+
+        _updateDimensions() {
+            const [w, h] = this.get_size();
+            if (w <= 0 || h <= 0)
+                return;
+
+            const isHighRes = (w > 2000 || h > 1200);
+            const targetRenderScale = isHighRes ? 0.5 : 1.0;
+            const rw = Math.max(1, Math.round(w * targetRenderScale));
+            const rh = Math.max(1, Math.round(h * targetRenderScale));
+
+            const actorScaleX = w / rw;
+            const actorScaleY = h / rh;
+            const renderScaleX = rw / w;
+            const renderScaleY = rh / h;
+
+            if (this._renderScaleX === renderScaleX &&
+                this._renderScaleY === renderScaleY &&
+                this._actorScaleX === actorScaleX &&
+                this._actorScaleY === actorScaleY &&
+                this._committedArea.width === rw &&
+                this._committedArea.height === rh) {
+                return;
+            }
+
+            this._renderScaleX = renderScaleX;
+            this._renderScaleY = renderScaleY;
+            this._actorScaleX = actorScaleX;
+            this._actorScaleY = actorScaleY;
+
+            this._committedArea.set_size(rw, rh);
+            this._committedArea.set_scale(actorScaleX, actorScaleY);
+
+            this._activeArea.set_size(rw, rh);
+            this._activeArea.set_scale(actorScaleX, actorScaleY);
         }
 
         vfunc_destroy() {
@@ -332,8 +474,11 @@ const DrawingCanvas = GObject.registerClass(
         setColor(hex) { this._strokeColor = hex; }
         setTool(id) {
             this._toolId = id;
-            if (id !== 'drag' && id !== 'rectangle' && id !== 'solid-rectangle')
+            if (id !== 'drag' && id !== 'rectangle' && id !== 'solid-rectangle') {
                 this._selectedStroke = null;
+                this._transformHiddenStroke = null;
+                this._previewActor?.hide();
+            }
             this._committedArea.queue_repaint();
         }
         setStrokeWidth(w) { this._strokeWidth = w; }
@@ -342,7 +487,10 @@ const DrawingCanvas = GObject.registerClass(
             this._strokes = [];
             this._currentStroke = null;
             this._activeBBox = null;
+            this._prevActiveBBox = null;
             this._activeArea.hide();
+            this._previewActor?.hide();
+            this._transformHiddenStroke = null;
             this._stampCounter = 1;
             this._selectedStroke = null;
             this._transformMode = null;
@@ -363,6 +511,8 @@ const DrawingCanvas = GObject.registerClass(
                     this._transformMode = null;
                     this._transformHandle = null;
                     this._transformOrigBounds = null;
+                    this._transformHiddenStroke = null;
+                    this._previewActor?.hide();
                 }
                 this._committedArea.queue_repaint();
             }
@@ -376,6 +526,10 @@ const DrawingCanvas = GObject.registerClass(
             const idx = this._strokes.indexOf(this._selectedStroke);
             if (idx !== -1)
                 this._strokes.splice(idx, 1);
+            if (this._transformHiddenStroke === this._selectedStroke) {
+                this._transformHiddenStroke = null;
+                this._previewActor?.hide();
+            }
             this._selectedStroke = null;
             this._transformMode = null;
             this._transformHandle = null;
@@ -390,6 +544,8 @@ const DrawingCanvas = GObject.registerClass(
                 const tool = getToolDef(stroke.toolId);
                 if (tool?.hitTest?.(stroke, stageX, stageY)) {
                     this._selectedStroke = stroke;
+                    this._transformHiddenStroke = null;
+                    this._previewActor?.hide();
                     this._committedArea.queue_repaint();
                     return stroke;
                 }
@@ -398,6 +554,8 @@ const DrawingCanvas = GObject.registerClass(
             this._transformMode = null;
             this._transformHandle = null;
             this._transformOrigBounds = null;
+            this._transformHiddenStroke = null;
+            this._previewActor?.hide();
             this._committedArea.queue_repaint();
             return null;
         }
@@ -408,6 +566,8 @@ const DrawingCanvas = GObject.registerClass(
                 this._transformMode = null;
                 this._transformHandle = null;
                 this._transformOrigBounds = null;
+                this._transformHiddenStroke = null;
+                this._previewActor?.hide();
                 this._committedArea.queue_repaint();
             }
         }
@@ -444,11 +604,31 @@ const DrawingCanvas = GObject.registerClass(
             this._transformStartY = stageY;
             if (doGrab && !this._dragGrab)
                 this._dragGrab = global.stage.grab(this._overlay ?? this);
+
+            const isRect = (this._selectedStroke.toolId === 'rectangle' || this._selectedStroke.toolId === 'solid-rectangle');
+            this._transformHiddenStroke = this._selectedStroke;
+            this._committedArea.queue_repaint();
+
+            this._updateOrigin();
+            const ox = this._originX ?? 0;
+            const oy = this._originY ?? 0;
+
+            if (isRect) {
+                this._previewActor.updateFromStroke(this._selectedStroke, ox, oy, true);
+                this._previewActor.show();
+            } else {
+                this._prevActiveBBox = null;
+                this._activeBBox = null;
+                this._updateActiveAreaGeometry();
+            }
+            this._onTransformStarted?.();
         }
 
         updateTransform(stageX, stageY, shiftHeld = false, altHeld = false) {
             if (!this._selectedStroke || !this._transformMode) return;
             const selBounds = this._getSelectionBounds();
+            const isRect = (this._selectedStroke.toolId === 'rectangle' || this._selectedStroke.toolId === 'solid-rectangle');
+
             if (this._transformMode === 'resize' && this._transformOrigBounds) {
                 if (selBounds) {
                     stageX = Math.max(selBounds.minX, Math.min(selBounds.maxX, stageX));
@@ -534,12 +714,20 @@ const DrawingCanvas = GObject.registerClass(
                     { x: minX, y: minY },
                     { x: maxX, y: maxY },
                 ];
-                this._committedArea.queue_repaint();
+
+                this._updateOrigin();
+                const ox = this._originX ?? 0;
+                const oy = this._originY ?? 0;
+                if (isRect) {
+                    this._previewActor.updateFromStroke(this._selectedStroke, ox, oy, true);
+                }
             } else if (this._transformMode === 'move') {
                 let dx = stageX - this._transformStartX;
                 let dy = stageY - this._transformStartY;
                 if (selBounds) {
-                    const b = getRectangleBounds(this._selectedStroke);
+                    const b = isRect
+                        ? getRectangleBounds(this._selectedStroke)
+                        : (getToolDef(this._selectedStroke.toolId)?.bounds?.(this._selectedStroke));
                     if (b) {
                         if (b.minX + dx < selBounds.minX) dx = selBounds.minX - b.minX;
                         if (b.maxX + dx > selBounds.maxX) dx = selBounds.maxX - b.maxX;
@@ -553,7 +741,15 @@ const DrawingCanvas = GObject.registerClass(
                 }
                 this._transformStartX = stageX;
                 this._transformStartY = stageY;
-                this._committedArea.queue_repaint();
+
+                this._updateOrigin();
+                const ox = this._originX ?? 0;
+                const oy = this._originY ?? 0;
+                if (isRect) {
+                    this._previewActor.updateFromStroke(this._selectedStroke, ox, oy, true);
+                } else {
+                    this._updateActiveAreaGeometry();
+                }
             }
         }
 
@@ -573,11 +769,17 @@ const DrawingCanvas = GObject.registerClass(
             this._transformMode = null;
             this._transformHandle = null;
             this._transformOrigBounds = null;
+            this._transformHiddenStroke = null;
+            this._previewActor?.hide();
+            this._activeArea?.hide();
+            this._prevActiveBBox = null;
+            this._activeBBox = null;
             if (this._dragGrab) {
                 this._dragGrab.dismiss();
                 this._dragGrab = null;
             }
             this._committedArea.queue_repaint();
+            this._onStrokeTransformed?.(this._selectedStroke);
         }
 
         moveSelectedStroke(dx, dy) {
@@ -602,6 +804,10 @@ const DrawingCanvas = GObject.registerClass(
                 this._strokes.splice(idx, 1);
             if (this._selectedStroke === stroke)
                 this._selectedStroke = null;
+            if (this._transformHiddenStroke === stroke) {
+                this._transformHiddenStroke = null;
+                this._previewActor?.hide();
+            }
             this._committedArea.queue_repaint();
         }
 
@@ -674,6 +880,18 @@ const DrawingCanvas = GObject.registerClass(
 
             this._drawing = true;
             this._dragGrab = global.stage.grab(this._overlay ?? this);
+
+            const isRect = (this._toolId === 'rectangle' || this._toolId === 'solid-rectangle');
+            if (isRect) {
+                const ox = this._originX ?? 0;
+                const oy = this._originY ?? 0;
+                this._previewActor.updateFromStroke(this._currentStroke, ox, oy, false);
+                this._previewActor.show();
+                return;
+            }
+
+            this._prevActiveBBox = null;
+            this._activeBBox = null;
             this._updateActiveAreaGeometry();
         }
 
@@ -686,10 +904,11 @@ const DrawingCanvas = GObject.registerClass(
         }
 
         _updateActiveAreaGeometry() {
-            if (!this._currentStroke || this._currentStroke.stagePoints.length === 0)
+            const stroke = this._currentStroke ?? this._transformHiddenStroke;
+            if (!stroke || stroke.stagePoints.length === 0)
                 return;
 
-            const pts = this._currentStroke.stagePoints;
+            const pts = stroke.stagePoints;
             let minX = pts[0].x, minY = pts[0].y, maxX = pts[0].x, maxY = pts[0].y;
             for (let i = 1; i < pts.length; i++) {
                 const p = pts[i];
@@ -699,7 +918,7 @@ const DrawingCanvas = GObject.registerClass(
                 if (p.y > maxY) maxY = p.y;
             }
 
-            const pad = getStrokePadding(this._toolId, this._strokeWidth);
+            const pad = getStrokePadding(stroke.toolId, stroke.strokeWidth);
             const boxX = minX - pad;
             const boxY = minY - pad;
             const boxW = Math.max(1, Math.ceil(maxX - minX + pad * 2));
@@ -707,15 +926,8 @@ const DrawingCanvas = GObject.registerClass(
 
             this._activeBBox = { x: boxX, y: boxY, w: boxW, h: boxH };
 
-            if (this._originX === undefined || this._originY === undefined)
-                this._updateOrigin();
-
-            const localX = Math.round(boxX - (this._originX ?? 0));
-            const localY = Math.round(boxY - (this._originY ?? 0));
-
-            this._activeArea.set_position(localX, localY);
-            this._activeArea.set_size(boxW, boxH);
-            this._activeArea.show();
+            if (!this._activeArea.visible)
+                this._activeArea.show();
             this._activeArea.queue_repaint();
         }
 
@@ -726,31 +938,41 @@ const DrawingCanvas = GObject.registerClass(
             const isRect = (this._toolId === 'rectangle' || this._toolId === 'solid-rectangle');
             const selBounds = this._getSelectionBounds();
 
-            if (isRect && ctrlHeld && this._currentStroke.stagePoints.length > 1) {
-                let dx = stageX - this._lastDrawStageX;
-                let dy = stageY - this._lastDrawStageY;
+            if (isRect) {
+                if (ctrlHeld && this._currentStroke.stagePoints.length > 1) {
+                    let dx = stageX - this._lastDrawStageX;
+                    let dy = stageY - this._lastDrawStageY;
 
-                if (selBounds) {
-                    const pts = this._currentStroke.stagePoints;
-                    const minX = Math.min(pts[0].x, pts[1].x);
-                    const maxX = Math.max(pts[0].x, pts[1].x);
-                    const minY = Math.min(pts[0].y, pts[1].y);
-                    const maxY = Math.max(pts[0].y, pts[1].y);
+                    if (selBounds) {
+                        const pts = this._currentStroke.stagePoints;
+                        const minX = Math.min(pts[0].x, pts[1].x);
+                        const maxX = Math.max(pts[0].x, pts[1].x);
+                        const minY = Math.min(pts[0].y, pts[1].y);
+                        const maxY = Math.max(pts[0].y, pts[1].y);
 
-                    if (minX + dx < selBounds.minX) dx = selBounds.minX - minX;
-                    if (maxX + dx > selBounds.maxX) dx = selBounds.maxX - maxX;
-                    if (minY + dy < selBounds.minY) dy = selBounds.minY - minY;
-                    if (maxY + dy > selBounds.maxY) dy = selBounds.maxY - maxY;
-                }
+                        if (minX + dx < selBounds.minX) dx = selBounds.minX - minX;
+                        if (maxX + dx > selBounds.maxX) dx = selBounds.maxX - maxX;
+                        if (minY + dy < selBounds.minY) dy = selBounds.minY - minY;
+                        if (maxY + dy > selBounds.maxY) dy = selBounds.maxY - maxY;
+                    }
 
-                for (const p of this._currentStroke.stagePoints) {
-                    p.x += dx;
-                    p.y += dy;
+                    for (const p of this._currentStroke.stagePoints) {
+                        p.x += dx;
+                        p.y += dy;
+                    }
+                } else {
+                    if (this._currentStroke.stagePoints.length === 1)
+                        this._currentStroke.stagePoints.push({ x: stageX, y: stageY });
+                    else
+                        this._currentStroke.stagePoints[this._currentStroke.stagePoints.length - 1] = { x: stageX, y: stageY };
                 }
 
                 this._lastDrawStageX = stageX;
                 this._lastDrawStageY = stageY;
-                this._updateActiveAreaGeometry();
+                this._updateOrigin();
+                const ox = this._originX ?? 0;
+                const oy = this._originY ?? 0;
+                this._previewActor.updateFromStroke(this._currentStroke, ox, oy, false);
                 return;
             }
 
@@ -786,6 +1008,15 @@ const DrawingCanvas = GObject.registerClass(
         }
 
         _endDrawing(stageX = null, stageY = null) {
+            const isRect = (this._toolId === 'rectangle' || this._toolId === 'solid-rectangle');
+            if (isRect) {
+                this._previewActor?.hide();
+            } else {
+                this._activeArea.hide();
+                this._prevActiveBBox = null;
+                this._activeBBox = null;
+            }
+
             if (this._currentStroke) {
                 if (stageX !== null && stageY !== null) {
                     const selBounds = this._getSelectionBounds();
@@ -803,7 +1034,6 @@ const DrawingCanvas = GObject.registerClass(
                             pts[pts.length - 1] = { x: stageX, y: stageY };
                     }
                 }
-                const isRect = (this._toolId === 'rectangle' || this._toolId === 'solid-rectangle');
                 if (this._currentStroke.stagePoints.length > 1) {
                     let keepStroke = true;
                     if (isRect || this._toolId === 'arrow') {
@@ -823,8 +1053,6 @@ const DrawingCanvas = GObject.registerClass(
             }
 
             this._currentStroke = null;
-            this._activeBBox = null;
-            this._activeArea.hide();
             this._drawing = false;
             this._dragButton = 0;
 
@@ -886,7 +1114,6 @@ const DrawingCanvas = GObject.registerClass(
             if (this._transformMode) {
                 this.endTransform();
                 this._dragButton = 0;
-                this._onStrokeTransformed?.(this._selectedStroke);
                 return Clutter.EVENT_STOP;
             }
 
@@ -906,7 +1133,6 @@ const DrawingCanvas = GObject.registerClass(
                 const shiftHeld = (mods & Clutter.ModifierType.SHIFT_MASK) !== 0;
                 const altHeld = (mods & Clutter.ModifierType.MOD1_MASK) !== 0;
                 this.updateTransform(stageX, stageY, shiftHeld, altHeld);
-                this._onStrokeTransformed?.(this._selectedStroke);
                 return Clutter.EVENT_STOP;
             }
 
@@ -956,7 +1182,6 @@ const DrawingCanvas = GObject.registerClass(
                     const shiftHeld = (mods & Clutter.ModifierType.SHIFT_MASK) !== 0;
                     const altHeld = (mods & Clutter.ModifierType.MOD1_MASK) !== 0;
                     this.updateTransform(stageX, stageY, shiftHeld, altHeld);
-                    this._onStrokeTransformed?.(this._selectedStroke);
                     return Clutter.EVENT_STOP;
                 }
                 if (!this._drawing)
@@ -969,7 +1194,6 @@ const DrawingCanvas = GObject.registerClass(
                 if (this._transformMode) {
                     this.endTransform();
                     this._dragButton = 0;
-                    this._onStrokeTransformed?.(this._selectedStroke);
                     return Clutter.EVENT_STOP;
                 }
                 if (!this._drawing)
@@ -984,6 +1208,9 @@ const DrawingCanvas = GObject.registerClass(
         _paintCommitted(cr) {
             cr.save();
             try {
+                if (this._renderScaleX && (this._renderScaleX !== 1.0 || this._renderScaleY !== 1.0))
+                    cr.scale(this._renderScaleX, this._renderScaleY);
+
                 if (this._originX === undefined || this._originY === undefined)
                     this._updateOrigin();
 
@@ -999,6 +1226,9 @@ const DrawingCanvas = GObject.registerClass(
                 let stampCounter = 1;
 
                 for (const stroke of this._strokes) {
+                    if (stroke === this._transformHiddenStroke)
+                        continue;
+
                     const tool = getToolDef(stroke.toolId);
                     if (!tool?.render)
                         continue;
@@ -1023,7 +1253,7 @@ const DrawingCanvas = GObject.registerClass(
                     }
                 }
 
-                if (this._selectedStroke) {
+                if (this._selectedStroke && this._selectedStroke !== this._transformHiddenStroke) {
                     cr.save();
                     try {
                         this._renderSelectionOverlay(cr, this._selectedStroke, ox, oy);
@@ -1053,10 +1283,13 @@ const DrawingCanvas = GObject.registerClass(
             const w = brX - tlX;
             const h = brY - tlY;
 
+            const actorScale = this._actorScaleX ?? 1.0;
+            const lw = 1.5 / actorScale;
+
             // 1. Accent blue outline (#3584e4)
             cr.setSourceRGBA(0.208, 0.518, 0.894, 0.95);
-            cr.setLineWidth(1.5);
-            cr.setDash(isRect ? [] : [5, 4], 0);
+            cr.setLineWidth(lw);
+            cr.setDash(isRect ? [] : [5 / actorScale, 4 / actorScale], 0);
             cr.rectangle(tlX, tlY, w, h);
             cr.stroke();
 
@@ -1071,41 +1304,79 @@ const DrawingCanvas = GObject.registerClass(
                     cr.setSourceRGBA(1.0, 1.0, 1.0, 1.0);
                     cr.fillPreserve();
                     cr.setSourceRGBA(0.208, 0.518, 0.894, 1.0);
-                    cr.setLineWidth(1.5);
+                    cr.setLineWidth(lw);
                     cr.stroke();
                 }
             }
         }
 
+        _getDirtyActiveBBox(ox, oy) {
+            if (!this._activeBBox || !this._prevActiveBBox)
+                return null;
+
+            let minX = this._activeBBox.x;
+            let minY = this._activeBBox.y;
+            let maxX = this._activeBBox.x + this._activeBBox.w;
+            let maxY = this._activeBBox.y + this._activeBBox.h;
+
+            minX = Math.min(minX, this._prevActiveBBox.x);
+            minY = Math.min(minY, this._prevActiveBBox.y);
+            maxX = Math.max(maxX, this._prevActiveBBox.x + this._prevActiveBBox.w);
+            maxY = Math.max(maxY, this._prevActiveBBox.y + this._prevActiveBBox.h);
+
+            return {
+                x: Math.max(0, Math.floor(minX - ox - 6)),
+                y: Math.max(0, Math.floor(minY - oy - 6)),
+                w: Math.ceil(maxX - minX + 12),
+                h: Math.ceil(maxY - minY + 12),
+            };
+        }
+
         _paintActive(cr) {
-            if (!this._currentStroke || !this._activeBBox)
+            const strokeToRender = this._currentStroke ?? this._transformHiddenStroke;
+            if (!strokeToRender || !this._activeBBox)
                 return;
 
             cr.save();
             try {
-                cr.setOperator(Cairo.Operator.CLEAR);
-                cr.paint();
-                cr.setOperator(Cairo.Operator.OVER);
-                const tool = getToolDef(this._currentStroke.toolId);
-                if (!tool?.render)
-                    return;
+                if (this._renderScaleX && (this._renderScaleX !== 1.0 || this._renderScaleY !== 1.0))
+                    cr.scale(this._renderScaleX, this._renderScaleY);
 
-                const bboxX = this._activeBBox.x;
-                const bboxY = this._activeBBox.y;
+                if (this._originX === undefined || this._originY === undefined)
+                    this._updateOrigin();
 
-                const selBounds = this._getSelectionBounds();
-                if (selBounds) {
-                    cr.rectangle(selBounds.minX - bboxX, selBounds.minY - bboxY, selBounds.w, selBounds.h);
+                const ox = this._originX ?? 0;
+                const oy = this._originY ?? 0;
+
+                const dirty = this._getDirtyActiveBBox(ox, oy);
+                if (dirty) {
+                    cr.rectangle(dirty.x, dirty.y, dirty.w, dirty.h);
                     cr.clip();
                 }
 
-                const localPoints = this._currentStroke.stagePoints.map(p => ({
-                    x: p.x - bboxX,
-                    y: p.y - bboxY,
+                cr.setOperator(Cairo.Operator.CLEAR);
+                cr.paint();
+                cr.setOperator(Cairo.Operator.OVER);
+
+                this._prevActiveBBox = { ...this._activeBBox };
+
+                const tool = getToolDef(strokeToRender.toolId);
+                if (!tool?.render)
+                    return;
+
+                const selBounds = this._getSelectionBounds();
+                if (selBounds) {
+                    cr.rectangle(selBounds.minX - ox, selBounds.minY - oy, selBounds.w, selBounds.h);
+                    cr.clip();
+                }
+
+                const localPoints = strokeToRender.stagePoints.map(p => ({
+                    x: p.x - ox,
+                    y: p.y - oy,
                 }));
 
                 let stampCount = 1;
-                if (this._currentStroke.toolId === 'stamp') {
+                if (strokeToRender.toolId === 'stamp') {
                     for (const s of this._strokes) {
                         if (s.toolId === 'stamp')
                             stampCount++;
@@ -1113,11 +1384,11 @@ const DrawingCanvas = GObject.registerClass(
                 }
 
                 tool.render(cr, {
-                    color: this._currentStroke.color,
+                    color: strokeToRender.color,
                     points: localPoints,
-                    counter: this._currentStroke.counter ?? stampCount,
-                    text: this._currentStroke.text,
-                }, this._currentStroke.strokeWidth);
+                    counter: strokeToRender.counter ?? stampCount,
+                    text: strokeToRender.text,
+                }, strokeToRender.strokeWidth);
             } catch (err) {
                 log(`[Gradia] Error in _paintActive: ${err}`);
             } finally {
@@ -1568,11 +1839,13 @@ export default class GradiaCompanion extends Extension {
         const format = (this._portalMode || ocr) ? 'png' : this._settings.get_string('screenshot-format');
         const playSound = this._settings.get_boolean('play-sound');
         const customDir = this._settings.get_string('screenshot-directory');
+        const quality = this._settings.get_int('image-quality');
+        const lossless = this._settings.get_boolean('lossless-export');
 
-        const _capture = (texture, geometry, scale, cursor, compositeFn, windowComposite = null) => {
+        const _capture = (texture, geometry, scale, cursor, compositeFn, windowComposite = null, targetWidth = null, targetHeight = null) => {
             const capturePromise = captureAndStoreScreenshot(
                 texture, geometry, scale, cursor, compositeFn, windowComposite,
-                { copy: shouldCopy, save: shouldSave, externalSave, format, playSound, customDir }
+                { copy: shouldCopy, save: shouldSave, externalSave, format, playSound, customDir, quality, lossless, targetWidth, targetHeight }
             );
             // We have to await in portal mode to prevent a race condition where
             // the overlay gets closed before 'screenshot-taken' gets emitted, so the portal doesn't fail.
@@ -1636,9 +1909,15 @@ export default class GradiaCompanion extends Extension {
         const hasStrokes = this._canvases.some(c => c.hasStrokes());
         const strokeData = hasStrokes ? this._buildStrokeData() : null;
 
+        const [rawX, rawY, rawW, rawH] = ui._getSelectedGeometry(false);
+        const selectedGeometryScaled = ui._getSelectedGeometry(true);
+        const targetScale = this._getEffectiveCaptureScale([rawX, rawY, rawW, rawH]);
+        const targetWidth = Math.max(1, Math.round(rawW * targetScale));
+        const targetHeight = Math.max(1, Math.round(rawH * targetScale));
+
         return await _capture(
             content.get_texture(),
-            ui._getSelectedGeometry(true),
+            selectedGeometryScaled,
             ui._scale,
             {
                 texture: cursorTexture ?? null,
@@ -1646,8 +1925,54 @@ export default class GradiaCompanion extends Extension {
                 y: ui._cursor.y * ui._scale,
                 scale: this._getEffectiveCursorScale(ui._cursorScale),
             },
-            strokeData ? (bytes, pixbuf) => this._compositeStrokesOntoPixbuf(bytes, pixbuf, strokeData) : null
+            strokeData ? (bytes, pixbuf) => this._compositeStrokesOntoPixbuf(bytes, pixbuf, strokeData) : null,
+            null,
+            targetWidth,
+            targetHeight
         );
+    }
+
+    _getEffectiveCaptureScale(selectedGeometry) {
+        if (!this._settings.get_boolean('match-native-resolution')) {
+            const custom = this._settings.get_double('custom-resolution-scale');
+            return custom > 0 ? custom : 1.0;
+        }
+
+        const ui = Main.screenshotUI;
+        const monitors = Main.layoutManager.monitors ?? [];
+        if (monitors.length <= 1)
+            return monitors[0]?.geometry_scale ?? ui._scale;
+
+        if (ui._screenButton.checked) {
+            const index = ui._screenSelectors?.findIndex(s => s.checked) ?? -1;
+            if (index >= 0 && monitors[index]?.geometry_scale)
+                return monitors[index].geometry_scale;
+
+            const monitorBins = ui._monitorBins ?? [];
+            for (let i = 0; i < monitorBins.length; i++) {
+                const bin = monitorBins[i];
+                if (bin.checked || (bin.get_child?.()?.checked)) {
+                    const mon = monitors[i] ?? monitors.find(m => m.index === bin.index);
+                    if (mon?.geometry_scale)
+                        return mon.geometry_scale;
+                }
+            }
+        }
+
+        if (selectedGeometry) {
+            const [gx, gy, gw, gh] = selectedGeometry;
+            const cx = gx + gw / 2;
+            const cy = gy + gh / 2;
+            for (const mon of monitors) {
+                if (cx >= mon.x && cx < mon.x + mon.width &&
+                    cy >= mon.y && cy < mon.y + mon.height) {
+                    if (mon.geometry_scale)
+                        return mon.geometry_scale;
+                }
+            }
+        }
+
+        return Main.layoutManager.primaryMonitor?.geometry_scale ?? ui._scale;
     }
 
     _getEffectiveCursorScale(baseScale) {
@@ -1813,7 +2138,7 @@ export default class GradiaCompanion extends Extension {
                 this._dragToolCanvas.startTransform(stageX, stageY, handle, false);
                 const idx = this._canvases.indexOf(sel.canvas);
                 this._dragToolGrab = global.stage.grab(this._overlays[idx >= 0 ? idx : 0]);
-                this._updateTrashButton();
+                this._hideTrashButton();
                 this._updateCursor(stageX, stageY, sel.canvas, this._overlays[idx >= 0 ? idx : 0]);
                 return;
             }
@@ -1824,7 +2149,7 @@ export default class GradiaCompanion extends Extension {
                 this._dragToolCanvas.startTransform(stageX, stageY, null, false);
                 const idx = this._canvases.indexOf(sel.canvas);
                 this._dragToolGrab = global.stage.grab(this._overlays[idx >= 0 ? idx : 0]);
-                this._updateTrashButton();
+                this._hideTrashButton();
                 this._updateCursor(stageX, stageY, sel.canvas, this._overlays[idx >= 0 ? idx : 0]);
                 return;
             }
@@ -1834,7 +2159,7 @@ export default class GradiaCompanion extends Extension {
             const stroke = this._canvases[i].selectStrokeAt(stageX, stageY);
             if (stroke) {
                 this._clearAllSelections(this._canvases[i]);
-                this._updateTrashButton();
+                this._hideTrashButton();
                 this._toolbar._syncToStroke(stroke);
                 this._toolbar._updateDrawingControlsSensitivity();
 
@@ -1870,7 +2195,6 @@ export default class GradiaCompanion extends Extension {
         }
 
         this._dragToolCanvas.updateTransform(stageX, stageY, shiftHeld, altHeld);
-        this._updateTrashButton();
     }
 
     _onDragToolRelease() {
@@ -2140,14 +2464,16 @@ export default class GradiaCompanion extends Extension {
     }
 
     _setActorCursor(overlay, cursorType) {
-        if (overlay)
+        if (overlay && overlay.get_cursor_type?.() !== cursorType)
             overlay.set_cursor_type(cursorType);
         for (const ov of this._overlays) {
-            if (ov !== overlay)
+            if (ov !== overlay && ov.get_cursor_type?.() !== cursorType)
                 ov.set_cursor_type(cursorType);
         }
-        for (const c of this._canvases)
-            c.set_cursor_type(cursorType);
+        for (const c of this._canvases) {
+            if (c.get_cursor_type?.() !== cursorType)
+                c.set_cursor_type(cursorType);
+        }
     }
 
     _resetCursor() {
@@ -2424,6 +2750,9 @@ export default class GradiaCompanion extends Extension {
                 this._toolbar?._updateDrawingControlsSensitivity();
                 this._updateCursorForCurrentTool();
             };
+            canvas._onTransformStarted = () => {
+                this._hideTrashButton();
+            };
             canvas._onStrokeTransformed = (_stroke) => {
                 this._updateTrashButton();
                 this._updateCursorForCurrentTool();
@@ -2613,7 +2942,7 @@ export default class GradiaCompanion extends Extension {
 
         primaryBin.add_child(this._toolbar);
 
-        this._resolutionOverlay = new ResolutionOverlay(primaryBin);
+        this._resolutionOverlay = new ResolutionOverlay(primaryBin, this._settings);
 
         this._keyPressId = Main.screenshotUI.connect('key-press-event', (_actor, event) => {
             const sym = event.get_key_symbol();

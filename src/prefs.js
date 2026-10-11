@@ -125,9 +125,104 @@ const AboutPage = GObject.registerClass(
 
             formatRow.connect('notify::selected', () => {
                 const selected = formats[formatRow.get_selected()];
-                if (selected)
+                if (selected) {
                     this._settings.set_string('screenshot-format', selected.id);
+                    updateQualityRowVisibility();
+                }
             });
+
+            const losslessRow = new Adw.SwitchRow({
+                title: 'Lossless Mode',
+                subtitle: 'Save WebP images with mathematical lossless compression',
+            });
+            this._settings.bind('lossless-export', losslessRow, 'active', Gio.SettingsBindFlags.DEFAULT);
+
+            const qualityAdjustment = new Gtk.Adjustment({
+                lower: 1,
+                upper: 100,
+                step_increment: 1,
+                page_increment: 5,
+                value: this._settings.get_int('image-quality'),
+            });
+
+            const qualityRow = new Adw.ActionRow({
+                title: 'Image Quality',
+                subtitle: 'Export quality percentage for lossy formats (1–100%)',
+            });
+
+            const qualityScale = new Gtk.Scale({
+                orientation: Gtk.Orientation.HORIZONTAL,
+                adjustment: qualityAdjustment,
+                hexpand: true,
+                draw_value: true,
+                value_pos: Gtk.PositionType.RIGHT,
+                digits: 0,
+            });
+            qualityScale.set_size_request(200, -1);
+            qualityRow.add_suffix(qualityScale);
+            this._settings.bind('image-quality', qualityAdjustment, 'value', Gio.SettingsBindFlags.DEFAULT);
+
+            const updateQualityRowVisibility = () => {
+                const currentFmt = this._settings.get_string('screenshot-format');
+                const isLosslessEnabled = this._settings.get_boolean('lossless-export');
+
+                if (currentFmt === 'png') {
+                    losslessRow.visible = false;
+                    qualityRow.visible = false;
+                } else if (currentFmt === 'webp') {
+                    losslessRow.visible = true;
+                    losslessRow.subtitle = 'Save WebP images with mathematical lossless compression';
+                    qualityRow.visible = !isLosslessEnabled;
+                    qualityRow.subtitle = 'Export quality percentage for WebP (1–100%)';
+                } else if (currentFmt === 'avif') {
+                    losslessRow.visible = false;
+                    qualityRow.visible = true;
+                    qualityRow.subtitle = 'Export quality percentage for AVIF (1–100%)';
+                } else {
+                    losslessRow.visible = false;
+                    qualityRow.visible = true;
+                    qualityRow.subtitle = 'Export quality percentage for lossy formats (1–100%)';
+                }
+            };
+
+            losslessRow.connect('notify::active', () => {
+                updateQualityRowVisibility();
+            });
+
+            updateQualityRowVisibility();
+
+            const matchNativeResRow = new Adw.SwitchRow({
+                title: 'Match Native Resolution (1:1)',
+                subtitle: 'Capture at the active display\'s exact hardware pixel resolution (e.g. 3840 × 2160) to eliminate multi-monitor fractional blur',
+            });
+            this._settings.bind('match-native-resolution', matchNativeResRow, 'active', Gio.SettingsBindFlags.DEFAULT);
+
+            const customResAdjustment = new Gtk.Adjustment({
+                lower: 0.5,
+                upper: 3.0,
+                step_increment: 0.05,
+                page_increment: 0.25,
+                value: this._settings.get_double('custom-resolution-scale'),
+            });
+
+            const customResScaleSpinRow = new Adw.SpinRow({
+                title: 'Resolution Scale Factor',
+                subtitle: 'Multiplier applied to screen capture resolution (e.g. 1.00 = 100% logical desktop)',
+                adjustment: customResAdjustment,
+                digits: 2,
+            });
+            this._settings.bind('custom-resolution-scale', customResAdjustment, 'value', Gio.SettingsBindFlags.DEFAULT);
+
+            const updateResolutionRowVisibility = () => {
+                const matchNative = this._settings.get_boolean('match-native-resolution');
+                customResScaleSpinRow.visible = !matchNative;
+            };
+
+            matchNativeResRow.connect('notify::active', () => {
+                updateResolutionRowVisibility();
+            });
+
+            updateResolutionRowVisibility();
 
             const clearSelectionRow = new Adw.SwitchRow({
                 title: 'Disable Initial Selection',
@@ -162,6 +257,10 @@ const AboutPage = GObject.registerClass(
             });
 
             group.add(formatRow);
+            group.add(losslessRow);
+            group.add(qualityRow);
+            group.add(matchNativeResRow);
+            group.add(customResScaleSpinRow);
             group.add(screenshotDirRow);
             group.add(clearSelectionRow);
             group.add(compositeWindowRow);
