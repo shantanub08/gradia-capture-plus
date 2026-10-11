@@ -53,5 +53,21 @@
       <default>true</default>
       <summary>Temporarily disable software brightness dimming during screen recording</summary>
     </key>
+    <key name="match-native-resolution" type="b">
+      <default>true</default>
+      <summary>Match the active monitor's exact hardware resolution (1:1) to prevent multi-monitor fractional blur</summary>
+    </key>
+    <key name="custom-resolution-scale" type="d">
+      <default>1.0</default>
+      <summary>Custom resolution scaling factor for screenshots when native resolution matching is disabled</summary>
+    </key>
+    <key name="image-quality" type="i">
+      <default>100</default>
+      <summary>Image export quality percentage for lossy compression formats (1-100)</summary>
+    </key>
+    <key name="lossless-export" type="b">
+      <default>true</default>
+      <summary>Enable mathematical lossless compression for WebP and AVIF formats</summary>
+    </key>
   </schema>
 </schemalist>

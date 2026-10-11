@@ -7,8 +7,9 @@ const MIN_H = 50;
 const FADE_DURATION = 400;
 
 export class ResolutionOverlay {
-    constructor(primaryBin) {
+    constructor(primaryBin, settings = null) {
         this._primaryBin = primaryBin;
+        this._settings = settings;
         this._visible = false;
         this._motionId = null;
 
@@ -45,11 +46,20 @@ export class ResolutionOverlay {
         }
     }
 
-    _getMaxScale() {
-        return Main.layoutManager.monitors.reduce((best, mon) => {
-            const scale = mon.geometry_scale ?? global.stage.scale_factor ?? 1;
-            return scale > best ? scale : best;
-        }, 1);
+    _getScaleForPoint(stageX, stageY) {
+        if (this._settings && !this._settings.get_boolean('match-native-resolution'))
+            return this._settings.get_double('custom-resolution-scale') || 1.0;
+
+        const monitors = Main.layoutManager.monitors ?? [];
+        for (const mon of monitors) {
+            if (stageX >= mon.x && stageX < mon.x + mon.width &&
+                stageY >= mon.y && stageY < mon.y + mon.height) {
+                return mon.geometry_scale ?? global.stage.scale_factor ?? 1.0;
+            }
+        }
+
+        return Main.layoutManager.primaryMonitor?.geometry_scale ??
+               global.stage.scale_factor ?? 1.0;
     }
 
     _fadeIn() {
@@ -96,9 +106,11 @@ export class ResolutionOverlay {
         if (!this._visible)
             this._fadeIn();
 
-        const scale = this._getMaxScale();
+        const scale = this._getScaleForPoint(x + w / 2, y + h / 2);
         const physW = Math.round(w * scale);
         const physH = Math.round(h * scale);
+        const logW = Math.round(w);
+        const logH = Math.round(h);
 
         const [ok, localX, localY] = this._primaryBin.transform_stage_point(
             x + w / 2,
@@ -108,7 +120,10 @@ export class ResolutionOverlay {
         if (!ok)
             return;
 
-        this._label.set_text(`${physW}×${physH}`);
+        if (physW !== logW || physH !== logH)
+            this._label.set_text(`${physW}×${physH} (${logW}×${logH})`);
+        else
+            this._label.set_text(`${physW}×${physH}`);
 
         const [, natW] = this._label.get_preferred_width(-1);
         const [, natH] = this._label.get_preferred_height(-1);

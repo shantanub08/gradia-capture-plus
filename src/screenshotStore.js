@@ -29,10 +29,26 @@ function _saveRecentFile(screenshotFile) {
     bookmarks.to_file(recentFile);
 }
 
-function _pixbufSaveToStreamAsync(pixbuf, format = 'png') {
+function _pixbufSaveToStreamAsync(pixbuf, format = 'png', { quality = 100, lossless = true } = {}) {
     return new Promise((resolve, reject) => {
         const stream = Gio.MemoryOutputStream.new_resizable();
-        pixbuf.save_to_streamv_async(stream, format, [], [], null, (pb, res) => {
+        const keys = [];
+        const values = [];
+
+        if (format === 'webp') {
+            if (lossless) {
+                keys.push('lossless');
+                values.push('true');
+            } else {
+                keys.push('quality');
+                values.push(Math.max(1, Math.min(100, Math.round(quality))).toString());
+            }
+        } else if (format === 'avif') {
+            keys.push('quality');
+            values.push(Math.max(1, Math.min(100, Math.round(quality))).toString());
+        }
+
+        pixbuf.save_to_streamv_async(stream, format, keys, values, null, (pb, res) => {
             try {
                 GdkPixbuf.Pixbuf.save_to_stream_finish(res);
                 stream.close(null);
@@ -112,14 +128,17 @@ function _showToast(file, pixbuf, copyOnly) {
     showScreenshotToast(file, imageContent, pixbuf.width, pixbuf.height, copyOnly);
 }
 
-async function _storeScreenshotAsync(bytes, pixbuf, { copy = true, save = true, format = 'png', alreadyEncoded = false, customDir = null } = {}) {
+async function _storeScreenshotAsync(bytes, pixbuf, { copy = true, save = true, format = 'png', alreadyEncoded = false, customDir = null, quality = 100, lossless = true } = {}) {
     let finalBytes = bytes;
     if (format !== 'png' && !alreadyEncoded && save)
-        finalBytes = await _pixbufSaveToStreamAsync(pixbuf, format);
+        finalBytes = await _pixbufSaveToStreamAsync(pixbuf, format, { quality, lossless });
 
     if (copy) {
         const clipboard = St.Clipboard.get_default();
-        clipboard.set_content(St.ClipboardType.CLIPBOARD, 'image/png', bytes);
+        let pngBytes = bytes;
+        if (format !== 'png')
+            pngBytes = await _pixbufSaveToStreamAsync(pixbuf, 'png');
+        clipboard.set_content(St.ClipboardType.CLIPBOARD, 'image/png', pngBytes);
     }
 
     let file = null;
@@ -181,7 +200,7 @@ async function _pickSaveLocationViaPortal(suggestedName) {
     });
 }
 
-async function _saveToUserChosenLocation(bytes, pixbuf, format = 'png') {
+async function _saveToUserChosenLocation(bytes, pixbuf, format = 'png', { quality = 100, lossless = true } = {}) {
     const timestamp = GLib.DateTime.new_now_local().format('%Y-%m-%d %H-%M-%S');
     const suggestedName = `Screenshot From ${timestamp}.${format}`;
 
@@ -191,7 +210,7 @@ async function _saveToUserChosenLocation(bytes, pixbuf, format = 'png') {
 
     let finalBytes = bytes;
     if (format !== 'png')
-        finalBytes = await _pixbufSaveToStreamAsync(pixbuf, format);
+        finalBytes = await _pixbufSaveToStreamAsync(pixbuf, format, { quality, lossless });
 
     const file = await _writeBytesToFile(Gio.File.new_for_uri(chosenUri), finalBytes);
     if (file)
@@ -239,7 +258,7 @@ async function _captureWindowComposite(windowEntries, cursor) {
     return { bytes, pixbuf: finalPixbuf };
 }
 
-export async function captureAndStoreScreenshot(texture, geometry, scale, cursor, compositeFn, windowComposite = null, { copy = true, save = true, externalSave = false, format = 'png', playSound = true, customDir = null } = {}) {
+export async function captureAndStoreScreenshot(texture, geometry, scale, cursor, compositeFn, windowComposite = null, { copy = true, save = true, externalSave = false, format = 'png', playSound = true, customDir = null, quality = 100, lossless = true, targetWidth = null, targetHeight = null } = {}) {
     if (playSound)
         global.display.get_sound_player().play_from_theme('screen-capture', 'Screenshot taken', null);
 
@@ -266,18 +285,29 @@ export async function captureAndStoreScreenshot(texture, geometry, scale, cursor
         stream.close(null);
         finalBytes = stream.steal_as_bytes();
 
+        let needsEncode = false;
+        if (targetWidth && targetHeight &&
+            (finalPixbuf.get_width() !== targetWidth || finalPixbuf.get_height() !== targetHeight)) {
+            finalPixbuf = finalPixbuf.scale_simple(targetWidth, targetHeight, GdkPixbuf.InterpType.HYPER);
+            needsEncode = true;
+        }
+
         if (compositeFn) {
             const composited = compositeFn(finalBytes, finalPixbuf);
             if (composited) {
                 finalPixbuf = composited.pixbuf;
-                finalBytes = await _pixbufSaveToStreamAsync(finalPixbuf, format);
-                alreadyEncoded = true;
+                needsEncode = true;
             }
+        }
+
+        if (needsEncode) {
+            finalBytes = await _pixbufSaveToStreamAsync(finalPixbuf, format, { quality, lossless });
+            alreadyEncoded = true;
         }
     }
 
     if (externalSave)
-        return _saveToUserChosenLocation(finalBytes, finalPixbuf, format);
+        return _saveToUserChosenLocation(finalBytes, finalPixbuf, format, { quality, lossless });
 
-    return _storeScreenshotAsync(finalBytes, finalPixbuf, { copy, save, format, alreadyEncoded, customDir });
+    return _storeScreenshotAsync(finalBytes, finalPixbuf, { copy, save, format, alreadyEncoded, customDir, quality, lossless });
 }
